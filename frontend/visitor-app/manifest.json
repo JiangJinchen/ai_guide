@@ -13,7 +13,8 @@
     },
     "devServer": {
       "port": 8080
-    }
+    },
+    "aMapKey": "4356d3328eff90d2f825b5a0f5d686ca"
   },
   "mp-weixin": {
     "appid": "",
@@ -29,7 +30,13 @@
         "desc": "您的位置信息将用于查找附近景点"
       }
     },
-    "requiredPrivateInfos": ["getLocation", "startLocationUpdate"]
+    "requiredPrivateInfos": ["getLocation", "startLocationUpdate"],
+    "plugins": {
+      "amap": {
+        "version": "1.0.0",
+        "provider": "wx5bc25ee47103f69a"
+      }
+    }
   },
   "app-plus": {
     "usingComponents": true,
@@ -42,7 +49,20 @@
       "delay": 0,
       "image": "static/logo.png"
     },
-    "modules": {},
+    "modules": {
+      "Maps": {
+        "plugins": ["AMap"]
+      }
+    },
+    "amap": {
+      "key": "4356d3328eff90d2f825b5a0f5d686ca",
+      "android": {
+        "appkey": "4356d3328eff90d2f825b5a0f5d686ca"
+      },
+      "ios": {
+        "appkey": "4356d3328eff90d2f825b5a0f5d686ca"
+      }
+    },
     "distribute": {
       "android": {
         "permissions": [

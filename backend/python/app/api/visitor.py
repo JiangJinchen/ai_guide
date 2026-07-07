@@ -45,6 +45,7 @@ QWEN_API_URL = "https://apihub.agnes-ai.com/v1/chat/completions"
 QWEN_MODEL = "agnes-2.0-flash"
 AMAP_WEB_KEY = os.getenv("AMAP_WEB_KEY", "")
 AMAP_DISTANCE_URL = "https://restapi.amap.com/v3/distance"
+AMAP_WALKING_URL = "https://restapi.amap.com/v3/direction/walking"
 
 EMOTION_EXPRESSION_MAP = {
     "negative": "Sad",
@@ -493,11 +494,30 @@ class RouteGenerateRequest(RouteLocation):
     preferences: List[str] = Field(default_factory=list)
     duration_minutes: Optional[int] = 120
     must_spot_ids: List[int] = Field(default_factory=list)
+    start_spot_id: Optional[int] = None
     travel_mode: str = "walking"
 
 class SaveRouteRequest(BaseModel):
     user_id: str = "guest"
     route: dict
+
+class NavigationPoint(BaseModel):
+    id: Optional[int | str] = None
+    spot_id: Optional[int | str] = None
+    name: Optional[str] = None
+    latitude: float
+    longitude: float
+    location: Optional[str] = None
+    address: Optional[str] = None
+    order: Optional[int] = None
+
+class NavigationRouteRequest(BaseModel):
+    user_id: str = "guest"
+    provider: str = "amap"
+    travel_mode: str = "walking"
+    route_name: str = "游览路线"
+    start: NavigationPoint
+    waypoints: List[NavigationPoint] = Field(default_factory=list)
 
 def route_spot_name(spot):
     if isinstance(spot, dict):
@@ -738,6 +758,195 @@ def coordinate_payload(latitude, longitude, name="当前位置", spot_id=None):
         "longitude": longitude
     }
 
+def parse_amap_polyline(polyline: str):
+    points = []
+    for pair in (polyline or "").split(";"):
+        if not pair or "," not in pair:
+            continue
+        lng, lat = pair.split(",", 1)
+        try:
+            points.append({"latitude": float(lat), "longitude": float(lng)})
+        except ValueError:
+            continue
+    return points
+
+def append_polyline(target: list, points: list):
+    for point in points:
+        if target and target[-1]["latitude"] == point["latitude"] and target[-1]["longitude"] == point["longitude"]:
+            continue
+        target.append(point)
+
+def nav_point_payload(point):
+    return {
+        "id": point.id,
+        "spot_id": point.spot_id or point.id,
+        "name": point.name or "导航点",
+        "latitude": point.latitude,
+        "longitude": point.longitude,
+        "location": point.location or point.address or "灵山胜境景区内",
+        "order": point.order
+    }
+
+def local_navigation_segment(origin, destination, travel_mode):
+    distance = estimate_segment_distance_m(
+        origin["latitude"],
+        origin["longitude"],
+        destination["latitude"],
+        destination["longitude"],
+        travel_mode
+    )
+    duration = estimate_segment_minutes(distance, travel_mode) * 60
+    mid = {
+        "latitude": round((origin["latitude"] + destination["latitude"]) / 2, 6),
+        "longitude": round((origin["longitude"] + destination["longitude"]) / 2, 6)
+    }
+    polyline = [
+        {"latitude": origin["latitude"], "longitude": origin["longitude"]},
+        mid,
+        {"latitude": destination["latitude"], "longitude": destination["longitude"]}
+    ]
+    return {
+        "provider": "haversine_navigation",
+        "distance_m": distance,
+        "duration_sec": duration,
+        "polyline": polyline,
+        "steps": [{
+            "instruction": f"前往{destination.get('name') or '下一站'}",
+            "distance_m": distance,
+            "duration_sec": duration,
+            "polyline": polyline
+        }],
+        "raw_data": None
+    }
+
+def fetch_amap_walking_navigation(origin, destination):
+    if not AMAP_WEB_KEY:
+        return None
+
+    params = {
+        "key": AMAP_WEB_KEY,
+        "origin": f"{origin['longitude']},{origin['latitude']}",
+        "destination": f"{destination['longitude']},{destination['latitude']}"
+    }
+
+    try:
+        with httpx.Client(timeout=10, verify=False) as client:
+            response = client.get(AMAP_WALKING_URL, params=params)
+            response.raise_for_status()
+            payload = response.json()
+        if payload.get("status") != "1":
+            return None
+        paths = (payload.get("route") or {}).get("paths") or []
+        if not paths:
+            return None
+        path = paths[0]
+        all_points = []
+        steps = []
+        for step in path.get("steps") or []:
+            step_points = parse_amap_polyline(step.get("polyline", ""))
+            append_polyline(all_points, step_points)
+            distance = int(float(step.get("distance") or 0))
+            duration = int(float(step.get("duration") or 0))
+            steps.append({
+                "instruction": step.get("instruction") or "沿路线前行",
+                "road": step.get("road") or "",
+                "orientation": step.get("orientation") or "",
+                "distance_m": distance,
+                "duration_sec": duration,
+                "polyline": step_points
+            })
+
+        if not all_points:
+            all_points = [
+                {"latitude": origin["latitude"], "longitude": origin["longitude"]},
+                {"latitude": destination["latitude"], "longitude": destination["longitude"]}
+            ]
+        return {
+            "provider": "amap_walking",
+            "distance_m": int(float(path.get("distance") or 0)),
+            "duration_sec": int(float(path.get("duration") or 0)),
+            "polyline": all_points,
+            "steps": steps,
+            "raw_data": {
+                "distance": path.get("distance"),
+                "duration": path.get("duration")
+            }
+        }
+    except Exception as e:
+        return None
+
+def build_navigation_route(request: NavigationRouteRequest):
+    travel_mode = normalize_travel_mode(request.travel_mode)
+    travel_config = TRAVEL_MODE_CONFIG[travel_mode]
+    start = nav_point_payload(request.start)
+    waypoints = [nav_point_payload(point) for point in request.waypoints]
+    for index, point in enumerate(waypoints):
+        point["order"] = point.get("order") or index + 1
+
+    total_distance = 0
+    total_duration = 0
+    all_polyline = []
+    all_steps = []
+    segments = []
+    providers = []
+    previous = start
+
+    for index, destination in enumerate(waypoints):
+        segment = fetch_amap_walking_navigation(previous, destination)
+        if not segment:
+            segment = local_navigation_segment(previous, destination, travel_mode)
+
+        providers.append(segment["provider"])
+        total_distance += int(segment.get("distance_m") or 0)
+        total_duration += int(segment.get("duration_sec") or 0)
+        append_polyline(all_polyline, segment.get("polyline") or [])
+
+        segment_steps = []
+        for step in segment.get("steps") or []:
+            step_payload = {
+                **step,
+                "segment_order": index + 1,
+                "from_name": previous.get("name"),
+                "to_name": destination.get("name")
+            }
+            segment_steps.append(step_payload)
+            all_steps.append(step_payload)
+
+        segments.append({
+            "order": index + 1,
+            "from": previous,
+            "to": destination,
+            "provider": segment["provider"],
+            "distance_m": int(segment.get("distance_m") or 0),
+            "duration_sec": int(segment.get("duration_sec") or 0),
+            "polyline": segment.get("polyline") or [],
+            "steps": segment_steps
+        })
+        previous = destination
+
+    provider_type = "amap_walking" if providers and all(item == "amap_walking" for item in providers) else (
+        "amap_walking_with_fallback" if "amap_walking" in providers else "haversine_navigation"
+    )
+
+    return {
+        "route_name": request.route_name,
+        "provider": "amap",
+        "provider_type": provider_type,
+        "coordinate_system": "gcj02",
+        "travel_mode": travel_mode,
+        "travel_mode_label": travel_config["label"],
+        "start": start,
+        "start_location": start,
+        "waypoints": waypoints,
+        "total_distance_m": total_distance,
+        "total_duration_sec": total_duration,
+        "total_distance": total_distance,
+        "total_duration": math.ceil(total_duration / 60) if total_duration else 0,
+        "polyline": all_polyline,
+        "steps": all_steps,
+        "segments": segments
+    }
+
 def spot_payload(spot, db: Session = None):
     name = route_spot_name(spot)
     spot_id = route_spot_value(spot, "id", 0)
@@ -787,11 +996,15 @@ def build_route(
     longitude=None,
     travel_mode="walking",
     db: Optional[Session] = None,
-    distance_memo=None
+    distance_memo=None,
+    start_spot_id=None
 ):
     travel_mode = normalize_travel_mode(travel_mode)
     travel_config = TRAVEL_MODE_CONFIG[travel_mode]
-    route = sorted([spot_payload(spot, db) for spot in selected_spots], key=lambda item: item["weight"])
+    route = sorted(
+        [spot_payload(spot, db) for spot in selected_spots],
+        key=lambda item: (0 if start_spot_id and item["id"] == start_spot_id else 1, item["weight"])
+    )
     total_distance = 0
     prev_lat = latitude
     prev_lon = longitude
@@ -935,7 +1148,8 @@ def select_route_spots(
     longitude,
     travel_mode,
     db: Optional[Session] = None,
-    distance_memo=None
+    distance_memo=None,
+    start_spot_id=None
 ):
     selected = list(required_spots)
     selected_ids = {route_spot_value(spot, "id") for spot in selected}
@@ -952,7 +1166,18 @@ def select_route_spots(
         if len(selected) >= target_count:
             break
         next_selected = selected + [spot]
-        next_route = build_route("候选路线", "generated", "", next_selected, latitude, longitude, travel_mode, db, distance_memo)
+        next_route = build_route(
+            "候选路线",
+            "generated",
+            "",
+            next_selected,
+            latitude,
+            longitude,
+            travel_mode,
+            db,
+            distance_memo,
+            start_spot_id
+        )
         if next_route["total_duration"] <= budget or len(selected) < max(1, min(2, target_count)):
             selected = next_selected
             selected_ids.add(route_spot_value(spot, "id"))
@@ -988,18 +1213,22 @@ def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)
         base_label = "必去景点路线"
 
     for variant_name, target_count in variants:
-        selected = select_route_spots(
-            spots,
-            required_spots,
-            preferences,
-            budget,
-            target_count,
-            request.latitude,
-            request.longitude,
-            travel_mode,
-            db,
-            distance_memo
-        )
+        if required_spots and not preferences:
+            selected = required_spots
+        else:
+            selected = select_route_spots(
+                spots,
+                required_spots,
+                preferences,
+                budget,
+                target_count,
+                request.latitude,
+                request.longitude,
+                travel_mode,
+                db,
+                distance_memo,
+                request.start_spot_id
+            )
         route = build_route(
             f"{base_label}{variant_name}",
             "generated",
@@ -1009,7 +1238,8 @@ def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)
             request.longitude,
             travel_mode,
             db,
-            distance_memo
+            distance_memo,
+            request.start_spot_id
         )
         signature = tuple(item["id"] for item in route["route"])
         if signature in seen_signatures:
@@ -1021,10 +1251,11 @@ def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)
         route["preferences"] = preferences
         route["start_location"] = {
             "latitude": request.latitude,
-            "longitude": request.longitude
+            "longitude": request.longitude,
+            "spot_id": request.start_spot_id
         }
         route["description"] = route_description(preferences, len(required_spots), route["is_over_time"])
-        route["strategy"] = f"先锁定生成时的起点，按必去景点约束、偏好匹配和官方游览顺序选点排序；距离与耗时按{route['travel_mode_label']}和{route['distance_model']['type']}计算，移动中不自动重算整条路线。"
+        route["strategy"] = f"先锁定生成时的起点，若起点景点在路线中则作为第一站，其余景点按必去约束、偏好匹配和官方游览顺序排序；距离与耗时按{route['travel_mode_label']}和{route['distance_model']['type']}计算，移动中不自动重算整条路线。"
         routes.append(route)
 
     routes.sort(key=lambda item: (item["is_over_time"], item["total_duration"], -item["total_spots"]))
@@ -1035,6 +1266,7 @@ def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)
             "duration_minutes": budget,
             "travel_mode": travel_mode,
             "must_spot_ids": request.must_spot_ids,
+            "start_spot_id": request.start_spot_id,
             "start": {
                 "latitude": request.latitude,
                 "longitude": request.longitude
@@ -1067,6 +1299,12 @@ def get_route_history(user_id: str = "guest", limit: int = 20, db: Session = Dep
         }
         for item in records
     ]
+
+@router.post("/routes/navigation")
+def generate_navigation_route(request: NavigationRouteRequest):
+    if not request.waypoints:
+        raise HTTPException(status_code=400, detail="请至少选择一个导航目的地")
+    return build_navigation_route(request)
 
 from time import sleep
 

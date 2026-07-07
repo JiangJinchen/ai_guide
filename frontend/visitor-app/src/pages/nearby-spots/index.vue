@@ -5,9 +5,6 @@
         <text class="page-title">附近景点</text>
         <text class="page-subtitle">实时查看周边景点与配套服务</text>
       </view>
-      <view class="refresh-icon" :class="{ spinning: locationStatus === 'loading' }" @click="refreshLocation">
-        <text>⟳</text>
-      </view>
     </view>
 
     <view class="location-card" :class="statusClass">
@@ -16,7 +13,14 @@
         <text class="location-title">{{ statusTitle }}</text>
         <text class="location-desc">{{ statusDescription }}</text>
       </view>
-      <text class="manual-btn" @click.stop="refreshLocation">手动定位</text>
+      <view class="location-actions">
+        <view class="icon-btn-small" :class="{ spinning: locationStatus === 'loading' }" @click.stop="refreshLocation">
+          <text class="icon-text">⟳</text>
+        </view>
+        <view class="icon-btn-small" @click.stop="openLocationSelector">
+          <text class="icon-text">📍</text>
+        </view>
+      </view>
     </view>
 
     <view class="map-panel">
@@ -120,6 +124,33 @@
         <text class="empty-desc">换个距离范围试试呢</text>
       </view>
     </view>
+
+    <view class="location-mask" v-if="showLocationSelector" @click="showLocationSelector = false">
+      <view class="location-panel" @click.stop>
+        <view class="location-head">
+          <text class="location-title-text">选择当前所在景点</text>
+          <text class="location-close" @click="showLocationSelector = false">×</text>
+        </view>
+        <view class="location-list">
+          <view
+            class="location-item"
+            :class="{ active: isLocationActive(spot) }"
+            v-for="spot in allSpots"
+            :key="spot.id"
+            @click="selectLocation(spot)"
+          >
+            <view class="location-check">{{ isLocationActive(spot) ? '✓' : '' }}</view>
+            <view class="location-info">
+              <text class="location-name">{{ spot.spot_name || spot.name }}</text>
+              <text class="location-coord">{{ formatCoordinate(spot.latitude) }}，{{ formatCoordinate(spot.longitude) }}</text>
+            </view>
+          </view>
+          <view class="empty-state" v-if="allSpots.length === 0">
+            <text>暂无可选景点</text>
+          </view>
+        </view>
+      </view>
+    </view>
   </view>
 </template>
 
@@ -192,8 +223,7 @@ export default {
       allSpots: [],
       backendNearbySpots: [],
       selectedDistance: 1000,
-      locationTimer: null,
-      autoRefreshMs: 20000,
+      showLocationSelector: false,
       distanceOptions: [
         { label: '500m内', value: 500 },
         { label: '1km内', value: 1000 },
@@ -274,15 +304,6 @@ export default {
     this.loadAllSpots()
     this.refreshLocation()
   },
-  onShow() {
-    this.startRealtimeLocation()
-  },
-  onHide() {
-    this.stopRealtimeLocation()
-  },
-  onUnload() {
-    this.stopRealtimeLocation()
-  },
   methods: {
     async loadAllSpots() {
       try {
@@ -290,34 +311,6 @@ export default {
         this.allSpots = Array.isArray(list) && list.length ? list : fallbackSpots
       } catch (e) {
         this.allSpots = fallbackSpots
-      }
-    },
-    startRealtimeLocation() {
-      if (!this.locationTimer) {
-        this.locationTimer = setInterval(() => {
-          this.refreshLocation({ silent: true })
-        }, this.autoRefreshMs)
-      }
-
-      if (typeof uni.startLocationUpdate === 'function' && typeof uni.onLocationChange === 'function') {
-        uni.startLocationUpdate({
-          type: 'gcj02',
-          success: () => {},
-          fail: () => {}
-        })
-        uni.onLocationChange(this.handleLocationChange)
-      }
-    },
-    stopRealtimeLocation() {
-      if (this.locationTimer) {
-        clearInterval(this.locationTimer)
-        this.locationTimer = null
-      }
-      if (typeof uni.offLocationChange === 'function') {
-        uni.offLocationChange(this.handleLocationChange)
-      }
-      if (typeof uni.stopLocationUpdate === 'function') {
-        uni.stopLocationUpdate()
       }
     },
     async refreshLocation(options = {}) {
@@ -340,14 +333,34 @@ export default {
         }
       }
     },
-    handleLocationChange(res) {
-      const location = saveLocation({
-        latitude: res.latitude,
-        longitude: res.longitude,
-        accuracy: res.accuracy,
-        provider: 'gcj02'
-      })
-      if (location) this.applyLocation(location)
+    openLocationSelector() {
+      this.showLocationSelector = true
+    },
+    selectLocation(spot) {
+      const latitude = Number(spot.latitude)
+      const longitude = Number(spot.longitude)
+      if (!latitude || !longitude) return
+      
+      this.userLocation = {
+        latitude,
+        longitude,
+        name: spot.spot_name || spot.name,
+        spot_id: spot.id,
+        source: 'manual'
+      }
+      this.locationStatus = 'success'
+      this.locationMessage = `当前起点 ${spot.spot_name || spot.name}`
+      this.showLocationSelector = false
+      saveLocation({ latitude, longitude, accuracy: 0, provider: 'gcj02' })
+      this.loadNearbySpots()
+    },
+    isLocationActive(spot) {
+      if (!this.userLocation || !spot) return false
+      return Math.abs(this.userLocation.latitude - Number(spot.latitude)) < 0.00001 &&
+             Math.abs(this.userLocation.longitude - Number(spot.longitude)) < 0.00001
+    },
+    formatCoordinate(value) {
+      return Number(value).toFixed(5)
     },
     applyLocation(location) {
       const latitude = Number(location.latitude)
@@ -932,5 +945,130 @@ export default {
   margin-top: 10rpx;
   color: #8c765e;
   font-size: 24rpx;
+}
+
+.location-actions {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+}
+
+.icon-btn-small {
+  width: 56rpx;
+  height: 56rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: #f3e3c4;
+  color: #8c3228;
+  font-size: 28rpx;
+}
+
+.icon-btn-small.spinning {
+  animation: spin 1s linear infinite;
+}
+
+.icon-text {
+  font-size: 28rpx;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.location-mask {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.location-panel {
+  width: 100%;
+  max-height: 70vh;
+  border-radius: 24rpx 24rpx 0 0;
+  background: #fff;
+  overflow: hidden;
+}
+
+.location-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 28rpx 32rpx;
+  border-bottom: 1rpx solid rgba(120, 72, 37, 0.1);
+}
+
+.location-title-text {
+  font-size: 32rpx;
+  font-weight: 850;
+  color: #4b2b1f;
+}
+
+.location-close {
+  font-size: 40rpx;
+  color: #8c765e;
+}
+
+.location-list {
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 16rpx 0;
+}
+
+.location-item {
+  display: flex;
+  align-items: center;
+  gap: 20rpx;
+  padding: 24rpx 32rpx;
+}
+
+.location-item.active {
+  background: rgba(140, 50, 40, 0.05);
+}
+
+.location-check {
+  width: 40rpx;
+  height: 40rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 2rpx solid #d4c5a8;
+  color: #8c3228;
+  font-size: 24rpx;
+  font-weight: 800;
+}
+
+.location-item.active .location-check {
+  background: #8c3228;
+  border-color: #8c3228;
+  color: #fff;
+}
+
+.location-info {
+  flex: 1;
+}
+
+.location-name {
+  display: block;
+  font-size: 28rpx;
+  font-weight: 800;
+  color: #4b2b1f;
+}
+
+.location-coord {
+  display: block;
+  margin-top: 6rpx;
+  font-size: 22rpx;
+  color: #8c765e;
 }
 </style>

@@ -33,6 +33,14 @@
       }
     },
     {
+      "path": "pages/route-navigation/index",
+      "style": {
+        "navigationBarTitleText": "全程导航",
+        "navigationBarBackgroundColor": "#ffffff",
+        "navigationBarTextStyle": "black"
+      }
+    },
+    {
       "path": "pages/profile/index",
       "style": {
         "navigationBarTitleText": "我的",

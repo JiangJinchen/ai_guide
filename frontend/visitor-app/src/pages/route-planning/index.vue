@@ -22,7 +22,7 @@
         <view class="icon-btn-small" @click.stop="refreshLocation">
           <text class="icon-text">⟳</text>
         </view>
-        <view class="icon-btn-small" @click.stop="showLocationSelector = true">
+        <view class="icon-btn-small" @click.stop="openLocationSelector">
           <text class="icon-text">📍</text>
         </view>
       </view>
@@ -179,21 +179,10 @@
     <view class="location-mask" v-if="showLocationSelector" @click="showLocationSelector = false">
       <view class="location-panel" @click.stop>
         <view class="location-head">
-          <text class="location-title-text">选择起点位置</text>
+          <text class="location-title-text">选择当前所在景点</text>
           <text class="location-close" @click="showLocationSelector = false">×</text>
         </view>
         <view class="location-list">
-          <view
-            class="location-item"
-            :class="{ active: isLocationActive(DEFAULT_SCENIC_LOCATION) }"
-            @click="selectLocation(DEFAULT_SCENIC_LOCATION)"
-          >
-            <view class="location-check">{{ isLocationActive(DEFAULT_SCENIC_LOCATION) ? '✓' : '' }}</view>
-            <view class="location-info">
-              <text class="location-name">{{ DEFAULT_SCENIC_LOCATION.name }}</text>
-              <text class="location-coord">{{ DEFAULT_SCENIC_LOCATION.latitude.toFixed(5) }}，{{ DEFAULT_SCENIC_LOCATION.longitude.toFixed(5) }}</text>
-            </view>
-          </view>
           <view
             class="location-item"
             :class="{ active: isLocationActive(spot) }"
@@ -204,8 +193,11 @@
             <view class="location-check">{{ isLocationActive(spot) ? '✓' : '' }}</view>
             <view class="location-info">
               <text class="location-name">{{ spot.spot_name || spot.name }}</text>
-              <text class="location-coord">{{ (spot.latitude || 0).toFixed(5) }}，{{ (spot.longitude || 0).toFixed(5) }}</text>
+              <text class="location-coord">{{ formatCoordinate(spot.latitude) }}，{{ formatCoordinate(spot.longitude) }}</text>
             </view>
+          </view>
+          <view class="empty-state" v-if="allSpots.length === 0">
+            <text>暂无可选景点</text>
           </view>
         </view>
       </view>
@@ -215,7 +207,7 @@
 
 <script>
 import { get, post } from '@/utils/request'
-import { formatLocationText, getLocationErrorMessage, requestCurrentLocation, DEFAULT_SCENIC_LOCATION } from '@/utils/location'
+import { formatLocationText, getLocationErrorMessage, requestCurrentLocation } from '@/utils/location'
 
 const fallbackSpots = [
   { id: 1, spot_name: '灵山大照壁', description: '进入灵山胜境后的第一处标志性打卡点。', location: '景区入口' },
@@ -304,7 +296,10 @@ export default {
         const location = await requestCurrentLocation({ allowCache: true, allowFallback: true })
         this.userLocation = {
           latitude: location.latitude,
-          longitude: location.longitude
+          longitude: location.longitude,
+          name: location.name || '',
+          spot_id: null,
+          source: location.isFallback ? 'fallback' : 'current'
         }
         this.locationStatus = 'success'
         this.locationMessage = formatLocationText(location)
@@ -338,6 +333,7 @@ export default {
           duration_minutes: this.activeDuration,
           travel_mode: this.travelMode,
           must_spot_ids: this.selectedSpots,
+          start_spot_id: this.userLocation?.spot_id,
           latitude: this.userLocation?.latitude,
           longitude: this.userLocation?.longitude
         })
@@ -359,8 +355,19 @@ export default {
         this.routeHistory = []
       }
     },
+    openLocationSelector() {
+      if (!this.allSpots.length) {
+        this.loadAllSpots()
+      }
+      this.showLocationSelector = true
+    },
     openRouteDetail(route, fromHistory = false) {
-      uni.setStorageSync('activeRoutePlan', { ...route, __from_history: fromHistory })
+      const startLocation = fromHistory ? route.start_location : (this.userLocation || route.start_location || null)
+      uni.setStorageSync('activeRoutePlan', {
+        ...route,
+        start_location: startLocation,
+        __from_history: fromHistory
+      })
       uni.navigateTo({ url: '/pages/route-detail/index' })
     },
     formatDistance(distance) {
@@ -374,16 +381,30 @@ export default {
       const pad = num => String(num).padStart(2, '0')
       return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
     },
+    formatCoordinate(value) {
+      return Number(value || 0).toFixed(5)
+    },
     selectLocation(location) {
+      const latitude = Number(location.latitude)
+      const longitude = Number(location.longitude)
+      const name = location.spot_name || location.name || '景区景点'
+      if (!latitude || !longitude) {
+        uni.showToast({ title: '该景点暂无定位坐标', icon: 'none' })
+        return
+      }
       this.userLocation = {
-        latitude: Number(location.latitude),
-        longitude: Number(location.longitude)
+        latitude,
+        longitude,
+        name,
+        spot_id: location.id,
+        source: 'manual'
       }
       this.locationStatus = 'success'
-      this.locationMessage = `${location.name || (location.spot_name || location.name)} ${location.latitude.toFixed(5)}, ${location.longitude.toFixed(5)}`
+      this.locationMessage = `${name} ${latitude.toFixed(5)}, ${longitude.toFixed(5)}`
       this.showLocationSelector = false
     },
     isLocationActive(location) {
+      if (!this.userLocation || !location) return false
       return Math.abs(this.userLocation.latitude - Number(location.latitude)) < 0.00001 &&
              Math.abs(this.userLocation.longitude - Number(location.longitude)) < 0.00001
     }

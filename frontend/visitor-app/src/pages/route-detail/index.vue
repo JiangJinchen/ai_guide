@@ -36,12 +36,12 @@
 
     <view class="deviation-bar" v-if="deviationDistance !== null && deviationDistance > 80">
       <text>您已偏离生成起点约 {{ formatDistance(deviationDistance) }}</text>
-      <text class="deviation-action" @click="replanFromCurrent">从当前位置重规划</text>
+      <text class="deviation-action" @click="relocate">重新定位</text>
     </view>
 
     <view class="action-bar">
-      <button class="action-btn primary" @click="navigateNextStop">导航到下一站</button>
-      <button class="action-btn" @click="replanFromCurrent">从当前位置重规划</button>
+      <button class="action-btn primary" @click="navigateFullRoute">导航全程</button>
+      <button class="action-btn" @click="relocate">重新定位</button>
       <button class="action-btn" @click="saveRoute">保存路线</button>
       <button class="action-btn" @click="shareRoute">分享路线</button>
     </view>
@@ -109,6 +109,11 @@ import { get, post } from '@/utils/request'
 import { requestCurrentLocation } from '@/utils/location'
 
 const DEFAULT_LOCATION = { latitude: 31.43039, longitude: 120.09658 }
+const TRAVEL_MODE_CONFIG = {
+  walking: { speed: 70, factor: 1.25, extra: 0 },
+  sightseeing_bus: { speed: 180, factor: 1.35, extra: 4 },
+  accessible: { speed: 55, factor: 1.35, extra: 1 }
+}
 const SPOT_COORDS = {
   灵山大照壁: { latitude: 31.42892, longitude: 120.09487 },
   五明桥: { latitude: 31.42924, longitude: 120.09542 },
@@ -198,7 +203,13 @@ export default {
       if (!fromHistory) this.saveRoute(true)
     }
     this.loadAllSpots()
-    this.refreshLocation()
+    const startLocation = this.getRouteStartLocation()
+    if (startLocation) {
+      this.userLocation = startLocation
+      this.routeSpots = this.routeSpots.map(spot => ({ ...spot, style: this.pointStyle(spot) }))
+    } else {
+      this.refreshLocation()
+    }
   },
   methods: {
     userId() {
@@ -212,19 +223,53 @@ export default {
         this.allSpots = []
       }
     },
-    async refreshLocation() {
+    async refreshLocation(options = {}) {
       try {
-        const location = await requestCurrentLocation({ allowCache: true, allowFallback: true })
-        this.userLocation = { latitude: location.latitude, longitude: location.longitude }
+        const location = await requestCurrentLocation({
+          allowCache: options.allowCache ?? true,
+          allowFallback: options.allowFallback ?? true
+        })
+        this.userLocation = {
+          latitude: location.latitude,
+          longitude: location.longitude,
+          name: location.name || '当前位置',
+          source: location.isFallback ? 'fallback' : 'current'
+        }
         this.routeSpots = this.routeSpots.map(spot => ({ ...spot, style: this.pointStyle(spot) }))
+        if (this.routePlan) {
+          this.routePlan.start_location = this.userLocation
+          this.syncRoutePlan()
+          this.savedOnce = false
+        }
+        return true
       } catch (e) {
         this.routeSpots = this.routeSpots.map(spot => ({ ...spot, style: this.pointStyle(spot) }))
+        return false
       }
+    },
+    async relocate() {
+      const located = await this.refreshLocation({ allowCache: false, allowFallback: false })
+      uni.showToast({ title: located ? '已重新定位' : '定位失败，请稍后重试', icon: 'none' })
     },
     applyRoutePlan(route) {
       this.routePlan = route
       this.routeSpots = (route.route || []).map(this.normalizeSpot).map(item => ({ ...item, style: this.pointStyle(item) }))
       uni.setStorageSync('activeRoutePlan', this.routePlan)
+    },
+    hasValidLocation(location) {
+      const latitude = Number(location?.latitude)
+      const longitude = Number(location?.longitude)
+      return latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180
+    },
+    getRouteStartLocation() {
+      const start = this.routePlan?.start_location
+      if (!this.hasValidLocation(start)) return null
+      return {
+        latitude: Number(start.latitude),
+        longitude: Number(start.longitude),
+        name: start.name || '当前位置',
+        source: start.source || 'route'
+      }
     },
     normalizeSpot(spot) {
       const name = spot.spot_name || spot.name || '灵山景点'
@@ -255,13 +300,79 @@ export default {
       return `left:${pos.x}%;top:${pos.y}%;`
     },
     calculateRouteDistance() {
-      let total = 0
-      let prev = this.userLocation || DEFAULT_LOCATION
-      this.routeSpots.forEach(item => {
-        total += this.distance(prev.latitude, prev.longitude, item.latitude, item.longitude)
-        prev = item
+      return this.buildRouteMetrics().total_distance
+    },
+    travelConfig() {
+      return TRAVEL_MODE_CONFIG[this.routePlan?.travel_mode] || TRAVEL_MODE_CONFIG.walking
+    },
+    estimateSegmentDistance(from, to) {
+      const straightDistance = this.distance(from.latitude, from.longitude, to.latitude, to.longitude)
+      return {
+        straightDistance: Math.round(straightDistance),
+        distance: Math.round(straightDistance * this.travelConfig().factor)
+      }
+    },
+    estimateSegmentMinutes(distance) {
+      if (!distance) return 0
+      const config = this.travelConfig()
+      return Math.ceil(distance / config.speed) + config.extra
+    },
+    buildRouteMetrics() {
+      const start = this.userLocation || this.getRouteStartLocation() || DEFAULT_LOCATION
+      let prev = {
+        id: null,
+        name: start.name || '当前位置',
+        latitude: Number(start.latitude),
+        longitude: Number(start.longitude)
+      }
+      let totalDistance = 0
+      let travelDuration = 0
+      const segments = this.routeSpots.map((spot, index) => {
+        const metrics = this.estimateSegmentDistance(prev, spot)
+        const travelMinutes = this.estimateSegmentMinutes(metrics.distance)
+        totalDistance += metrics.distance
+        travelDuration += travelMinutes
+        const segment = {
+          order: index + 1,
+          from: {
+            spot_id: prev.id,
+            name: prev.name,
+            latitude: prev.latitude,
+            longitude: prev.longitude
+          },
+          to: {
+            spot_id: spot.id,
+            name: spot.name,
+            latitude: spot.latitude,
+            longitude: spot.longitude
+          },
+          spot_id: spot.id,
+          name: spot.name,
+          provider: 'frontend_relocated_estimate',
+          straight_distance_from_previous: metrics.straightDistance,
+          distance_from_previous: metrics.distance,
+          duration_sec: travelMinutes * 60,
+          travel_minutes: travelMinutes,
+          walk_minutes: travelMinutes,
+          stay_minutes: Number(spot.stay_minutes || 25)
+        }
+        prev = {
+          id: spot.id,
+          name: spot.name,
+          latitude: spot.latitude,
+          longitude: spot.longitude
+        }
+        return segment
       })
-      return Math.round(total)
+      const stayDuration = this.routeSpots.reduce((sum, item) => sum + Number(item.stay_minutes || 25), 0)
+      return {
+        total_distance: Math.round(totalDistance),
+        travel_duration: travelDuration,
+        walk_duration: travelDuration,
+        stay_duration: stayDuration,
+        total_duration: stayDuration + travelDuration,
+        segments
+      }
     },
     distance(lat1, lon1, lat2, lon2) {
       if (!lat1 || !lon1 || !lat2 || !lon2) return 0
@@ -355,12 +466,17 @@ export default {
       this.popupSpot = spot
     },
     syncRoutePlan() {
+      const metrics = this.buildRouteMetrics()
       this.routePlan = {
         ...this.routePlan,
         route: this.routeSpots,
         total_spots: this.routeSpots.length,
-        total_distance: this.totalDistance,
-        total_duration: this.totalDuration
+        total_distance: metrics.total_distance,
+        total_duration: metrics.total_duration,
+        travel_duration: metrics.travel_duration,
+        walk_duration: metrics.walk_duration,
+        stay_duration: metrics.stay_duration,
+        segments: metrics.segments
       }
       uni.setStorageSync('activeRoutePlan', this.routePlan)
     },
@@ -376,36 +492,29 @@ export default {
         address: spot.location || '灵山胜境景区内'
       })
     },
-    navigateNextStop() {
-      if (!this.routeSpots.length) return
-      this.navigateToSpot(this.routeSpots[0])
-    },
-    async replanFromCurrent() {
-      if (!this.routePlan) return
-      uni.showLoading({ title: '重新规划中...' })
-      try {
-        const res = await post('/routes/generate', {
-          user_id: this.userId(),
-          preferences: this.routePlan.preferences || [],
-          duration_minutes: this.routePlan.time_budget || this.totalDuration,
-          travel_mode: this.routePlan.travel_mode || 'walking',
-          must_spot_ids: this.routePlan.must_spot_ids || [],
-          latitude: this.userLocation?.latitude,
-          longitude: this.userLocation?.longitude
-        })
-        const route = (res.routes || [])[0]
-        if (!route) {
-          uni.showToast({ title: '暂无可用路线', icon: 'none' })
-          return
-        }
-        this.applyRoutePlan(route)
-        this.savedOnce = false
-        uni.showToast({ title: '已从当前位置重规划', icon: 'none' })
-      } catch (e) {
-        uni.showToast({ title: '重规划失败', icon: 'none' })
-      } finally {
-        uni.hideLoading()
+    navigateFullRoute() {
+      if (!this.routeSpots.length) {
+        uni.showToast({ title: '暂无可导航景点', icon: 'none' })
+        return
       }
+      const startLocation = this.userLocation || this.getRouteStartLocation()
+      if (!this.hasValidLocation(startLocation)) {
+        uni.showToast({ title: '请先重新定位', icon: 'none' })
+        return
+      }
+      uni.setStorageSync('activeRouteNavigation', {
+        route_name: this.routePlan?.route_name || '游览路线',
+        travel_mode: this.routePlan?.travel_mode || 'walking',
+        travel_mode_label: this.routePlan?.travel_mode_label || '步行',
+        start_location: startLocation,
+        waypoints: this.routeSpots.map((spot, index) => ({
+          ...spot,
+          order: index + 1
+        })),
+        total_distance: this.totalDistance,
+        total_duration: this.totalDuration
+      })
+      uni.navigateTo({ url: '/pages/route-navigation/index' })
     },
     async saveRoute(silent = false) {
       if (!this.routePlan || (!silent && this.savedOnce)) {
