@@ -13,10 +13,36 @@ import uuid
 import json
 import math
 import itertools
+import logging
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
+logger = logging.getLogger(__name__)
+
 http_client = httpx.AsyncClient(timeout=10)
+
+import time
+from collections import deque
+
+AMAP_API_CALLS = deque()
+AMAP_QPS_LIMIT = 5
+AMAP_TIME_WINDOW = 1
+
+def amap_rate_limited(func):
+    def wrapper(*args, **kwargs):
+        now = time.time()
+        while AMAP_API_CALLS and AMAP_API_CALLS[0] < now - AMAP_TIME_WINDOW:
+            AMAP_API_CALLS.popleft()
+        if len(AMAP_API_CALLS) >= AMAP_QPS_LIMIT:
+            wait_time = AMAP_TIME_WINDOW - (now - AMAP_API_CALLS[0])
+            if wait_time > 0:
+                time.sleep(wait_time)
+                now = time.time()
+                while AMAP_API_CALLS and AMAP_API_CALLS[0] < now - AMAP_TIME_WINDOW:
+                    AMAP_API_CALLS.popleft()
+        AMAP_API_CALLS.append(time.time())
+        return func(*args, **kwargs)
+    return wrapper
 
 router = APIRouter()
 
@@ -820,8 +846,10 @@ def local_navigation_segment(origin, destination, travel_mode):
         "raw_data": None
     }
 
+@amap_rate_limited
 def fetch_amap_walking_navigation(origin, destination):
     if not AMAP_WEB_KEY:
+        logger.info("[AMAP] 高德API密钥未配置，跳过高德导航")
         return None
 
     params = {
@@ -835,11 +863,27 @@ def fetch_amap_walking_navigation(origin, destination):
             response = client.get(AMAP_WALKING_URL, params=params)
             response.raise_for_status()
             payload = response.json()
-        if payload.get("status") != "1":
+
+        status = payload.get("status")
+        if status != "1":
+            err_code = payload.get("infocode")
+            err_msg = payload.get("info")
+            logger.warning(f"[AMAP] 高德API返回错误 - status={status}, infocode={err_code}, info={err_msg}")
+            if err_code == "10001":
+                logger.error("[AMAP] 高德API密钥无效或已过期")
+            elif err_code == "10002":
+                logger.error("[AMAP] 高德API服务未开通")
+            elif err_code == "10003":
+                logger.error("[AMAP] 高德API QPS超限，请检查密钥配额")
+            elif err_code == "10004":
+                logger.error("[AMAP] 高德API当日请求量超限")
             return None
+
         paths = (payload.get("route") or {}).get("paths") or []
         if not paths:
+            logger.warning("[AMAP] 高德API未返回路线数据")
             return None
+
         path = paths[0]
         all_points = []
         steps = []
@@ -862,6 +906,8 @@ def fetch_amap_walking_navigation(origin, destination):
                 {"latitude": origin["latitude"], "longitude": origin["longitude"]},
                 {"latitude": destination["latitude"], "longitude": destination["longitude"]}
             ]
+
+        logger.info(f"[AMAP] 高德API调用成功 - 距离={int(float(path.get('distance') or 0))}m, 耗时={int(float(path.get('duration') or 0))}s, 步骤数={len(steps)}")
         return {
             "provider": "amap_walking",
             "distance_m": int(float(path.get("distance") or 0)),
@@ -873,7 +919,14 @@ def fetch_amap_walking_navigation(origin, destination):
                 "duration": path.get("duration")
             }
         }
+    except httpx.TimeoutException:
+        logger.error("[AMAP] 高德API请求超时")
+        return None
+    except httpx.HTTPStatusError as e:
+        logger.error(f"[AMAP] 高德API HTTP错误 - {e.response.status_code}: {e.response.text}")
+        return None
     except Exception as e:
+        logger.error(f"[AMAP] 高德API调用异常 - {str(e)}")
         return None
 
 def build_navigation_route(request: NavigationRouteRequest):

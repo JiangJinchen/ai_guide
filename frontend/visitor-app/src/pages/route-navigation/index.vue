@@ -9,6 +9,7 @@
         :scale="17"
         :markers="mapMarkers"
         :polyline="mapPolyline"
+        :include-points="includePoints"
         show-location
         @markertap="handleMarkerTap"
       />
@@ -16,16 +17,15 @@
       <view class="map-status">
         <view class="status-main">
           <text class="status-title">{{ currentInstruction }}</text>
-          <text class="status-desc">{{ providerText }} · {{ formatDistance(totalDistance) }} · {{ formatDuration(totalDurationSec) }}</text>
+          <text class="status-desc">{{ trackingStatusText }} · {{ distanceToTargetText }} · {{ providerText }}</text>
         </view>
-        <view class="status-pill">{{ navigationData?.travel_mode_label || navigationPlan.travel_mode_label || '步行' }}</view>
+        <view class="status-pill">{{ navigationStateText }}</view>
       </view>
     </view>
 
     <view class="quick-actions">
-      <button class="action-btn primary" :loading="isLoading" @click="replanFromCurrent">重新定位规划</button>
-      <button class="action-btn" @click="openNextWaypoint">打开系统地图</button>
-      <button class="action-btn" @click="exitNavigation">退出</button>
+      <button class="action-btn" @click="toggleTracking">{{ isTracking ? '暂停追踪' : '开始追踪' }}</button>
+      <button class="action-btn primary" @click="openNextWaypoint">系统地图</button>
     </view>
 
     <view class="route-summary">
@@ -61,11 +61,11 @@
       </view>
       <text class="step-instruction">{{ activeStep.instruction }}</text>
       <text class="step-meta">
-        {{ activeStep.from_name || startName }} 到 {{ activeStep.to_name || nextWaypointName }}，约{{ formatDistance(activeStep.distance_m) }}
+        {{ activeStep.from_name || startName }} 到 {{ activeStep.to_name || nextWaypointName }}，剩余约{{ distanceToTargetText }}
       </text>
       <view class="step-actions">
-        <button class="step-btn" :disabled="activeStepIndex <= 0" @click="activeStepIndex -= 1">上一步</button>
-        <button class="step-btn primary" :disabled="activeStepIndex >= steps.length - 1" @click="activeStepIndex += 1">下一步</button>
+        <button class="step-btn" :disabled="activeStepIndex <= 0" @click="goPreviousStep">上一步</button>
+        <button class="step-btn primary" :disabled="activeStepIndex >= steps.length - 1" @click="goNextStep">下一步</button>
       </view>
     </view>
 
@@ -84,7 +84,9 @@
       </view>
 
       <view class="waypoint-card" v-for="spot in waypoints" :key="spot.id || spot.order">
-        <text class="waypoint-index">{{ spot.order }}</text>
+        <text class="waypoint-index" :class="{ arrived: isWaypointArrived(spot) }">
+          {{ isWaypointArrived(spot) ? '✓' : spot.order }}
+        </text>
         <view class="waypoint-main">
           <text class="waypoint-name">{{ spot.name }}</text>
           <text class="waypoint-meta">{{ spot.location || '灵山胜境景区内' }}</text>
@@ -113,6 +115,12 @@ const DEFAULT_LOCATION = {
   name: '灵山胜境游客中心'
 }
 
+const ARRIVE_STEP_THRESHOLD_M = 22
+const ARRIVE_WAYPOINT_THRESHOLD_M = 35
+const DEVIATION_THRESHOLD_M = 65
+const AUTO_ADVANCE_COOLDOWN_MS = 2500
+const AUTO_REPLAN_COOLDOWN_MS = 25000
+
 export default {
   data() {
     return {
@@ -120,7 +128,18 @@ export default {
       navigationData: null,
       currentLocation: null,
       activeStepIndex: 0,
-      isLoading: false
+      isLoading: false,
+      isTracking: false,
+      trackingStatus: 'idle',
+      navigationCompleted: false,
+      arrivedWaypointKeys: [],
+      deviationCount: 0,
+      lastAutoAdvanceAt: 0,
+      lastAutoReplanAt: 0,
+      locationChangeHandler: null,
+      trackingTimer: null,
+      simulationTimer: null,
+      simulationIndex: 0
     }
   },
   computed: {
@@ -139,15 +158,30 @@ export default {
     steps() {
       return this.navigationData?.steps || []
     },
+    segments() {
+      return this.navigationData?.segments || []
+    },
     activeStep() {
       return this.steps[this.activeStepIndex] || this.steps[0] || null
     },
+    activeSegment() {
+      const order = Number(this.activeStep?.segment_order || 0)
+      return order > 0 ? this.segments[order - 1] || null : null
+    },
+    currentTargetPoint() {
+      const stepPolyline = this.activeStep?.polyline || []
+      const stepTarget = stepPolyline[stepPolyline.length - 1]
+      if (this.isValidPoint(stepTarget)) return stepTarget
+      if (this.isValidPoint(this.activeSegment?.to)) return this.activeSegment.to
+      return this.waypoints[0] || null
+    },
     currentInstruction() {
-      if (this.isLoading) return '正在生成高德导航路线'
+      if (this.navigationCompleted) return '已到达终点，导航结束'
+      if (this.isLoading) return '正在重新生成高德导航指引'
       return this.activeStep?.instruction || '按地图路线前往下一站'
     },
     nextWaypointName() {
-      return this.waypoints[0]?.name || '下一站'
+      return this.currentTargetPoint?.name || this.waypoints[0]?.name || '下一站'
     },
     totalDistance() {
       return this.navigationData?.total_distance_m || this.navigationPlan?.total_distance || 0
@@ -161,6 +195,33 @@ export default {
       if (type === 'amap_walking_with_fallback') return '高德导航含本地兜底'
       if (type === 'haversine_navigation') return '本地估算导航'
       return '路线导航'
+    },
+    trackingStatusText() {
+      if (this.navigationCompleted) return '导航已结束'
+      if (this.trackingStatus === 'streaming') return '实时追踪中'
+      if (this.trackingStatus === 'polling') return '定位轮询中'
+      if (this.trackingStatus === 'simulating') return 'H5模拟移动'
+      if (this.trackingStatus === 'starting') return '正在开启定位'
+      if (this.trackingStatus === 'paused') return '追踪已暂停'
+      return '等待定位'
+    },
+    navigationStateText() {
+      if (this.navigationCompleted) return '已到达'
+      if (this.isTracking) return '导航中'
+      return this.navigationData?.travel_mode_label || this.navigationPlan?.travel_mode_label || '步行'
+    },
+    distanceToTarget() {
+      if (!this.isValidPoint(this.currentLocation) || !this.isValidPoint(this.currentTargetPoint)) return null
+      return this.calcDistanceM(
+        this.currentLocation.latitude,
+        this.currentLocation.longitude,
+        this.currentTargetPoint.latitude,
+        this.currentTargetPoint.longitude
+      )
+    },
+    distanceToTargetText() {
+      if (this.distanceToTarget === null) return '等待定位'
+      return `距下一点${this.formatDistance(this.distanceToTarget)}`
     },
     routePolyline() {
       const polyline = this.navigationData?.polyline || []
@@ -183,7 +244,7 @@ export default {
           height: 28,
           iconPath: startIcon,
           label: {
-            content: '起',
+            content: this.currentLocation ? '我' : '起',
             color: '#ffffff',
             fontSize: 12,
             bgColor: '#8c3228',
@@ -203,6 +264,7 @@ export default {
 
       this.waypoints.forEach((spot, index) => {
         if (!this.isValidPoint(spot)) return
+        const arrived = this.isWaypointArrived(spot)
         markers.push({
           id: index + 2,
           latitude: Number(spot.latitude),
@@ -212,10 +274,10 @@ export default {
           height: 26,
           iconPath: waypointIcon,
           label: {
-            content: String(spot.order || index + 1),
-            color: '#8c3228',
+            content: arrived ? '✓' : String(spot.order || index + 1),
+            color: arrived ? '#ffffff' : '#8c3228',
             fontSize: 12,
-            bgColor: '#fff8e8',
+            bgColor: arrived ? '#2f7d55' : '#fff8e8',
             borderRadius: 13,
             padding: 5
           },
@@ -249,27 +311,30 @@ export default {
       }]
     },
     includePoints() {
+      const polylinePoints = this.routePolyline.filter(this.isValidPoint)
       const points = [
         this.currentLocation,
         this.startLocation,
         ...this.waypoints,
-        this.routePolyline[0],
-        this.routePolyline[this.routePolyline.length - 1]
+        ...polylinePoints.slice(0, 1),
+        ...polylinePoints.slice(-1)
       ]
-      return points
+      const validPoints = points
         .filter(this.isValidPoint)
         .map(point => ({ latitude: Number(point.latitude), longitude: Number(point.longitude) }))
+      return validPoints.length > 0 ? validPoints : []
     }
   },
   onLoad() {
     const plan = uni.getStorageSync('activeRouteNavigation')
-    
     this.navigationPlan = plan || null
-    
     if (this.navigationPlan) {
       this.currentLocation = this.navigationPlan.start_location || null
       this.fetchNavigationRoute()
     }
+  },
+  onUnload() {
+    this.stopRealtimeTracking()
   },
   methods: {
     isValidPoint(point) {
@@ -277,8 +342,39 @@ export default {
       const lon = Number(point?.longitude)
       return lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180
     },
-    buildRequestPayload() {
-      const start = this.currentLocation || this.navigationPlan.start_location || DEFAULT_LOCATION
+    pointKey(point) {
+      return String(point?.spot_id || point?.id || point?.order || `${point?.latitude},${point?.longitude}`)
+    },
+    normalizeWaypoint(spot, index) {
+      return {
+        id: spot.id || spot.spot_id || index + 1,
+        spot_id: spot.spot_id || spot.id || null,
+        name: spot.name || spot.spot_name || `第${index + 1}站`,
+        latitude: Number(spot.latitude),
+        longitude: Number(spot.longitude),
+        location: spot.location || spot.address || '灵山胜境景区内',
+        order: index + 1
+      }
+    },
+    getRemainingWaypoints() {
+      const source = (this.navigationData?.waypoints?.length ? this.navigationData.waypoints : this.navigationPlan?.waypoints) || []
+      const validWaypoints = source.filter(this.isValidPoint)
+      if (!validWaypoints.length) return []
+
+      const targetKey = this.currentTargetPoint ? this.pointKey(this.currentTargetPoint) : ''
+      let startIndex = validWaypoints.findIndex(spot => this.pointKey(spot) === targetKey)
+      if (startIndex < 0 && this.activeSegment?.to) {
+        const segmentTargetKey = this.pointKey(this.activeSegment.to)
+        startIndex = validWaypoints.findIndex(spot => this.pointKey(spot) === segmentTargetKey)
+      }
+      if (startIndex < 0) {
+        startIndex = Math.max(0, Number(this.activeStep?.segment_order || 1) - 1)
+      }
+      return validWaypoints.slice(startIndex).filter(spot => !this.isWaypointArrived(spot))
+    },
+    buildRequestPayload(options = {}) {
+      const start = options.startPoint || this.currentLocation || this.navigationPlan.start_location || DEFAULT_LOCATION
+      const sourceWaypoints = options.remainingOnly ? this.getRemainingWaypoints() : (this.navigationPlan.waypoints || [])
       return {
         user_id: uni.getStorageSync('userId') || 'guest',
         provider: 'amap',
@@ -291,35 +387,39 @@ export default {
           longitude: Number(start.longitude),
           location: start.location || start.address || ''
         },
-        waypoints: (this.navigationPlan.waypoints || []).filter(this.isValidPoint).map((spot, index) => ({
-          id: spot.id || spot.spot_id || index + 1,
-          spot_id: spot.spot_id || spot.id || null,
-          name: spot.name || spot.spot_name || `第${index + 1}站`,
-          latitude: Number(spot.latitude),
-          longitude: Number(spot.longitude),
-          location: spot.location || spot.address || '灵山胜境景区内',
-          order: spot.order || index + 1
-        }))
+        waypoints: sourceWaypoints.filter(this.isValidPoint).map(this.normalizeWaypoint)
       }
     },
-    async fetchNavigationRoute() {
-      if (!this.navigationPlan?.waypoints?.length) return
+    async fetchNavigationRoute(options = {}) {
+      const payload = this.buildRequestPayload(options)
+      if (!payload.waypoints.length) {
+        this.completeNavigation()
+        return
+      }
+
       this.isLoading = true
       try {
-        const result = await post('/routes/navigation', this.buildRequestPayload())
+        const result = await post('/routes/navigation', payload)
         this.navigationData = result
         this.activeStepIndex = 0
+        this.navigationCompleted = false
+        if (!options.keepArrived) this.arrivedWaypointKeys = []
+        this.deviationCount = 0
       } catch (e) {
-        this.navigationData = this.buildFallbackNavigation()
+        this.navigationData = this.buildFallbackNavigation(options)
         uni.showToast({ title: '已使用本地路线兜底', icon: 'none' })
       } finally {
         this.isLoading = false
+        if (!this.isTracking && !this.navigationCompleted) {
+          this.startRealtimeTracking()
+        }
       }
     },
-    buildFallbackNavigation() {
+    buildFallbackNavigation(options = {}) {
       const start = this.currentLocation || this.navigationPlan.start_location || DEFAULT_LOCATION
-      const waypoints = (this.navigationPlan.waypoints || []).filter(this.isValidPoint)
-      const polyline = [start, ...waypoints].map(point => ({
+      const waypoints = (options.remainingOnly ? this.getRemainingWaypoints() : (this.navigationPlan.waypoints || [])).filter(this.isValidPoint)
+      const normalizedWaypoints = waypoints.map(this.normalizeWaypoint)
+      const polyline = [start, ...normalizedWaypoints].map(point => ({
         latitude: Number(point.latitude),
         longitude: Number(point.longitude)
       }))
@@ -328,35 +428,235 @@ export default {
         provider_type: 'haversine_navigation',
         travel_mode_label: this.navigationPlan.travel_mode_label || '步行',
         start_location: start,
-        waypoints,
+        waypoints: normalizedWaypoints,
         total_distance_m: this.navigationPlan.total_distance || 0,
         total_duration_sec: Number(this.navigationPlan.total_duration || 0) * 60,
         polyline,
-        steps: waypoints.map((spot, index) => ({
+        steps: normalizedWaypoints.map((spot, index) => ({
           instruction: `前往${spot.name || `第${index + 1}站`}`,
           distance_m: spot.distance_from_previous || 0,
-          from_name: index === 0 ? (start.name || '当前位置') : waypoints[index - 1]?.name,
-          to_name: spot.name
+          from_name: index === 0 ? (start.name || '当前位置') : normalizedWaypoints[index - 1]?.name,
+          to_name: spot.name,
+          segment_order: index + 1,
+          polyline: [index === 0 ? start : normalizedWaypoints[index - 1], spot].filter(this.isValidPoint)
+        })),
+        segments: normalizedWaypoints.map((spot, index) => ({
+          order: index + 1,
+          from: index === 0 ? start : normalizedWaypoints[index - 1],
+          to: spot
         }))
       }
     },
-    async replanFromCurrent() {
-      this.isLoading = true
+    startRealtimeTracking() {
+      if (this.navigationCompleted) return
+      this.clearTrackingTimers()
+      this.isTracking = true
+      this.trackingStatus = 'starting'
+      this.locationChangeHandler = this.handleLocationChange
+
+      if (process.env.UNI_PLATFORM === 'h5') {
+        this.startPollingTracking()
+        return
+      }
+
+      const canStream = typeof uni.startLocationUpdate === 'function' && typeof uni.onLocationChange === 'function'
+      if (canStream) {
+        uni.startLocationUpdate({
+          type: 'gcj02',
+          success: () => {
+            uni.onLocationChange(this.locationChangeHandler)
+            this.trackingStatus = 'streaming'
+          },
+          fail: () => {
+            this.startPollingTracking()
+          }
+        })
+        return
+      }
+      this.startPollingTracking()
+    },
+    startPollingTracking() {
+      this.trackingStatus = 'polling'
+      this.pullLocationOnce(false)
+      this.trackingTimer = setInterval(() => {
+        this.pullLocationOnce(true)
+      }, 4000)
+    },
+    async pullLocationOnce(allowSimulation = true) {
       try {
-        const location = await requestCurrentLocation({ allowCache: true, allowFallback: true })
-        this.currentLocation = {
-          ...location,
-          name: location.isFallback ? '默认起点' : '当前位置'
-        }
-        await this.fetchNavigationRoute()
+        const location = await requestCurrentLocation({
+          allowCache: false,
+          allowFallback: false,
+          highAccuracy: true
+        })
+        this.handleLocationChange(location)
       } catch (e) {
-        uni.showToast({ title: '定位失败，仍使用原起点', icon: 'none' })
-      } finally {
-        this.isLoading = false
+        if (allowSimulation && !this.simulationTimer) {
+          this.startSimulationTracking()
+        }
+      }
+    },
+    startSimulationTracking() {
+      const points = this.routePolyline.filter(this.isValidPoint)
+      if (points.length < 2) return
+      this.trackingStatus = 'simulating'
+      this.simulationIndex = 0
+      this.simulationTimer = setInterval(() => {
+        if (!this.isTracking || this.navigationCompleted) {
+          this.clearTrackingTimers()
+          return
+        }
+        const point = points[Math.min(this.simulationIndex, points.length - 1)]
+        this.handleLocationChange({
+          ...point,
+          accuracy: 8,
+          provider: 'simulation',
+          name: '模拟当前位置'
+        })
+        if (this.simulationIndex >= points.length - 1) {
+          clearInterval(this.simulationTimer)
+          this.simulationTimer = null
+        } else {
+          this.simulationIndex += 1
+        }
+      }, 1800)
+    },
+    stopRealtimeTracking() {
+      this.isTracking = false
+      if (!this.navigationCompleted) this.trackingStatus = 'paused'
+      this.clearTrackingTimers()
+      if (typeof uni.offLocationChange === 'function' && this.locationChangeHandler) {
+        uni.offLocationChange(this.locationChangeHandler)
+      }
+      if (typeof uni.stopLocationUpdate === 'function') {
+        uni.stopLocationUpdate({})
+      }
+      this.locationChangeHandler = null
+    },
+    clearTrackingTimers() {
+      if (this.trackingTimer) {
+        clearInterval(this.trackingTimer)
+        this.trackingTimer = null
+      }
+      if (this.simulationTimer) {
+        clearInterval(this.simulationTimer)
+        this.simulationTimer = null
+      }
+    },
+    toggleTracking() {
+      if (this.isTracking) {
+        this.stopRealtimeTracking()
+      } else {
+        this.startRealtimeTracking()
+      }
+    },
+    handleLocationChange(rawLocation) {
+      const location = this.normalizeTrackingLocation(rawLocation)
+      if (!location || this.navigationCompleted) return
+      this.currentLocation = location
+      this.evaluateNavigationProgress(location)
+    },
+    normalizeTrackingLocation(source = {}) {
+      const latitude = Number(source.latitude)
+      const longitude = Number(source.longitude)
+      if (!this.isValidPoint({ latitude, longitude })) return null
+      return {
+        latitude,
+        longitude,
+        accuracy: Number(source.accuracy || 0),
+        provider: source.provider || 'gcj02',
+        timestamp: Date.now(),
+        name: source.name || '当前位置'
+      }
+    },
+    evaluateNavigationProgress(location) {
+      if (!this.activeStep || !this.currentTargetPoint) return
+      const distance = this.calcDistanceM(
+        location.latitude,
+        location.longitude,
+        this.currentTargetPoint.latitude,
+        this.currentTargetPoint.longitude
+      )
+      const threshold = this.getArrivalThreshold(location, this.currentTargetPoint)
+      if (distance <= threshold) {
+        this.handleArriveCurrentTarget()
+        return
+      }
+      this.evaluateDeviation(location)
+    },
+    getArrivalThreshold(location, target) {
+      const isWaypoint = this.waypoints.some(spot => this.pointKey(spot) === this.pointKey(target))
+      const base = isWaypoint ? ARRIVE_WAYPOINT_THRESHOLD_M : ARRIVE_STEP_THRESHOLD_M
+      const accuracy = Number(location?.accuracy || 0)
+      return Math.max(base, accuracy ? Math.min(60, accuracy * 1.5) : base)
+    },
+    handleArriveCurrentTarget() {
+      const now = Date.now()
+      if (now - this.lastAutoAdvanceAt < AUTO_ADVANCE_COOLDOWN_MS) return
+      this.lastAutoAdvanceAt = now
+
+      if (this.currentTargetPoint) {
+        const matched = this.waypoints.find(spot => this.pointKey(spot) === this.pointKey(this.currentTargetPoint))
+        if (matched) this.markWaypointArrived(matched)
+      }
+
+      if (this.activeStepIndex < this.steps.length - 1) {
+        this.activeStepIndex += 1
+        this.deviationCount = 0
+        uni.showToast({ title: '已自动进入下一指引', icon: 'none' })
+        return
+      }
+      this.completeNavigation()
+    },
+    completeNavigation() {
+      if (this.navigationCompleted) return
+      this.navigationCompleted = true
+      this.trackingStatus = 'completed'
+      this.isTracking = false
+      this.clearTrackingTimers()
+      uni.showToast({ title: '已到达终点', icon: 'success' })
+    },
+    markWaypointArrived(spot) {
+      const key = this.pointKey(spot)
+      if (!this.arrivedWaypointKeys.includes(key)) {
+        this.arrivedWaypointKeys.push(key)
+      }
+    },
+    isWaypointArrived(spot) {
+      return this.arrivedWaypointKeys.includes(this.pointKey(spot))
+    },
+    evaluateDeviation(location) {
+      const polyline = this.activeStep?.polyline || this.activeSegment?.polyline || this.routePolyline
+      const distance = this.minDistanceToPolyline(location, polyline)
+      const accuracy = Number(location?.accuracy || 0)
+      const threshold = Math.max(DEVIATION_THRESHOLD_M, accuracy ? accuracy * 2 : 0)
+      this.deviationCount = distance > threshold ? this.deviationCount + 1 : 0
+      if (this.deviationCount >= 4) {
+        this.autoReplanAfterDeviation()
+      }
+    },
+    async autoReplanAfterDeviation() {
+      const now = Date.now()
+      if (this.isLoading || now - this.lastAutoReplanAt < AUTO_REPLAN_COOLDOWN_MS) return
+      this.lastAutoReplanAt = now
+      this.deviationCount = 0
+      uni.showToast({ title: '检测到偏离路线，正在重算指引', icon: 'none' })
+      await this.fetchNavigationRoute({ 
+        remainingOnly: true, 
+        keepArrived: true,
+        startPoint: this.currentLocation
+      })
+    },
+    goPreviousStep() {
+      if (this.activeStepIndex > 0) this.activeStepIndex -= 1
+    },
+    goNextStep() {
+      if (this.activeStepIndex < this.steps.length - 1) {
+        this.activeStepIndex += 1
       }
     },
     openNextWaypoint() {
-      const target = this.waypoints[0]
+      const target = this.currentTargetPoint || this.waypoints[0]
       if (target) this.openSpotMap(target)
     },
     openSpotMap(spot) {
@@ -378,8 +678,56 @@ export default {
         if (target) this.openSpotMap(target)
       }
     },
-    exitNavigation() {
-      uni.navigateBack()
+    calcDistanceM(lat1, lon1, lat2, lon2) {
+      if (![lat1, lon1, lat2, lon2].every(value => Number.isFinite(Number(value)))) return 0
+      const radius = 6371000
+      const dlat = this.toRadians(Number(lat2) - Number(lat1))
+      const dlon = this.toRadians(Number(lon2) - Number(lon1))
+      const a = Math.sin(dlat / 2) ** 2 +
+        Math.cos(this.toRadians(Number(lat1))) *
+        Math.cos(this.toRadians(Number(lat2))) *
+        Math.sin(dlon / 2) ** 2
+      return Math.round(radius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)))
+    },
+    toRadians(value) {
+      return value * Math.PI / 180
+    },
+    minDistanceToPolyline(point, polyline = []) {
+      const points = polyline.filter(this.isValidPoint)
+      if (!this.isValidPoint(point) || points.length === 0) return 0
+      if (points.length === 1) {
+        return this.calcDistanceM(point.latitude, point.longitude, points[0].latitude, points[0].longitude)
+      }
+      let min = Infinity
+      for (let index = 0; index < points.length - 1; index += 1) {
+        min = Math.min(min, this.distanceToSegmentM(point, points[index], points[index + 1]))
+      }
+      return min === Infinity ? 0 : min
+    },
+    distanceToSegmentM(point, start, end) {
+      const origin = point
+      const p = this.projectPoint(point, origin)
+      const a = this.projectPoint(start, origin)
+      const b = this.projectPoint(end, origin)
+      const dx = b.x - a.x
+      const dy = b.y - a.y
+      if (dx === 0 && dy === 0) return Math.sqrt((p.x - a.x) ** 2 + (p.y - a.y) ** 2)
+      const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy)))
+      const x = a.x + t * dx
+      const y = a.y + t * dy
+      return Math.sqrt((p.x - x) ** 2 + (p.y - y) ** 2)
+    },
+    projectPoint(point, origin) {
+      const lat = Number(point.latitude)
+      const lon = Number(point.longitude)
+      const originLat = Number(origin.latitude)
+      const originLon = Number(origin.longitude)
+      const metersPerLat = 111000
+      const metersPerLon = 111000 * Math.cos(this.toRadians(originLat))
+      return {
+        x: (lon - originLon) * metersPerLon,
+        y: (lat - originLat) * metersPerLat
+      }
     },
     formatDistance(distance) {
       const value = Number(distance || 0)
@@ -464,6 +812,7 @@ export default {
   margin-top: 8rpx;
   color: #8b7355;
   font-size: 23rpx;
+  line-height: 1.35;
 }
 
 .status-pill,
@@ -478,14 +827,15 @@ export default {
 }
 
 .quick-actions {
-  display: flex;
-  gap: 14rpx;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12rpx;
   padding: 22rpx 24rpx 0;
 }
 
 .action-btn,
 .step-btn {
-  flex: 1;
+  min-width: 0;
   height: 72rpx;
   margin: 0;
   display: flex;
@@ -495,7 +845,7 @@ export default {
   border-radius: 16rpx;
   background: #fff8e8;
   color: #8c3228;
-  font-size: 24rpx;
+  font-size: 23rpx;
   font-weight: 700;
   box-shadow: 0 4rpx 18rpx rgba(55, 37, 26, 0.08);
 }
@@ -628,6 +978,10 @@ export default {
   background: linear-gradient(135deg, #8c3228, #a65c3e);
   color: #fff8e8;
   font-weight: bold;
+}
+
+.waypoint-index.arrived {
+  background: linear-gradient(135deg, #2f7d55, #4c9b70);
 }
 
 .waypoint-main {
