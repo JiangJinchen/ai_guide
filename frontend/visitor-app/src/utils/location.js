@@ -48,6 +48,9 @@ export const getLocationErrorMessage = (error) => {
   if (/timeout|超时/.test(message)) {
     return '定位超时，请走到开阔处后重试'
   }
+  if (/translate|coordinate|system|转换|坐标系/.test(message)) {
+    return '坐标转换失败，请检查网络或稍后重试'
+  }
   return '暂时无法获取定位，可稍后刷新'
 }
 
@@ -58,33 +61,73 @@ export const requestCurrentLocation = (options = {}) => {
     highAccuracy = true
   } = options
 
+  console.log('[Location] 开始请求定位', { allowCache, allowFallback, highAccuracy })
+
+  const isH5 = process.env.UNI_PLATFORM === 'h5'
+  const locationType = isH5 ? 'wgs84' : 'gcj02'
+  console.log('[Location] 当前平台:', process.env.UNI_PLATFORM, '定位类型:', locationType)
+
   return new Promise((resolve, reject) => {
     uni.getLocation({
-      type: 'gcj02',
+      type: locationType,
       isHighAccuracy: highAccuracy,
       success: (res) => {
+        console.log('[Location] ✅ 定位成功', {
+          latitude: res.latitude,
+          longitude: res.longitude,
+          accuracy: res.accuracy,
+          errMsg: res.errMsg,
+          type: locationType
+        })
         const location = saveLocation({
           latitude: res.latitude,
           longitude: res.longitude,
           accuracy: res.accuracy,
-          provider: 'gcj02'
+          provider: locationType
         })
         if (location) {
+          console.log('[Location] ✅ 返回真实位置', location)
           resolve(location)
         } else {
+          console.log('[Location] ❌ 定位结果无效')
           reject(new Error('定位结果无效'))
         }
       },
       fail: (error) => {
-        const cached = allowCache ? getCachedLocation() : null
-        if (cached) {
-          resolve(cached)
-          return
+        const errMsg = error?.errMsg || error?.message || JSON.stringify(error)
+        console.log('[Location] ❌ 定位失败', {
+          errMsg,
+          errorCode: error?.code
+        })
+        
+        if (/auth|authorize|permission|denied|拒绝|权限/.test(errMsg)) {
+          console.log('[Location] 原因：用户未授权定位权限')
+        } else if (/timeout|超时/.test(errMsg)) {
+          console.log('[Location] 原因：定位超时，可能GPS信号弱或网络问题')
+        } else if (/not|available|不支持/.test(errMsg)) {
+          console.log('[Location] 原因：当前环境不支持定位API')
+        } else if (/translate|coordinate|system|转换|坐标系/.test(errMsg)) {
+          console.log('[Location] 原因：坐标转换失败，通常是因为缺少高德地图key或网络问题')
+        } else {
+          console.log('[Location] 原因：其他未知错误')
         }
+
+        if (allowCache) {
+          const cached = getCachedLocation()
+          if (cached) {
+            console.log('[Location] ⚠️ 降级使用缓存位置', cached)
+            resolve(cached)
+            return
+          }
+          console.log('[Location] ℹ️ 无缓存位置可用')
+        }
+
         if (allowFallback) {
+          console.log('[Location] ⚠️ 降级使用默认位置（灵山胜境游客中心）', DEFAULT_SCENIC_LOCATION)
           resolve(normalizeLocation({ ...DEFAULT_SCENIC_LOCATION, isFallback: true, provider: 'gcj02' }))
           return
         }
+
         reject(error)
       }
     })
