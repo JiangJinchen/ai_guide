@@ -108,7 +108,13 @@
 import { get, post } from '@/utils/request'
 import { requestCurrentLocation } from '@/utils/location'
 
-const DEFAULT_LOCATION = { latitude: 31.43039, longitude: 120.09658 }
+const DEFAULT_LOCATION = { latitude: 31.42892, longitude: 120.09487 }
+const SCENIC_ENTRY_LOCATION = {
+  ...DEFAULT_LOCATION,
+  name: '灵山胜境游客中心',
+  source: 'scenic_entry'
+}
+const SCENIC_AREA_RADIUS_M = 5000
 const TRAVEL_MODE_CONFIG = {
   walking: { speed: 70, factor: 1.25, extra: 0 },
   sightseeing_bus: { speed: 180, factor: 1.35, extra: 4 },
@@ -317,8 +323,8 @@ export default {
       const config = this.travelConfig()
       return Math.ceil(distance / config.speed) + config.extra
     },
-    buildRouteMetrics() {
-      const start = this.userLocation || this.getRouteStartLocation() || DEFAULT_LOCATION
+    buildRouteMetrics(spots = this.routeSpots, startPoint = this.userLocation || this.getRouteStartLocation() || DEFAULT_LOCATION) {
+      const start = startPoint
       let prev = {
         id: null,
         name: start.name || '当前位置',
@@ -327,7 +333,7 @@ export default {
       }
       let totalDistance = 0
       let travelDuration = 0
-      const segments = this.routeSpots.map((spot, index) => {
+      const segments = spots.map((spot, index) => {
         const metrics = this.estimateSegmentDistance(prev, spot)
         const travelMinutes = this.estimateSegmentMinutes(metrics.distance)
         totalDistance += metrics.distance
@@ -364,7 +370,7 @@ export default {
         }
         return segment
       })
-      const stayDuration = this.routeSpots.reduce((sum, item) => sum + Number(item.stay_minutes || 25), 0)
+      const stayDuration = spots.reduce((sum, item) => sum + Number(item.stay_minutes || 25), 0)
       return {
         total_distance: Math.round(totalDistance),
         travel_duration: travelDuration,
@@ -373,6 +379,38 @@ export default {
         total_duration: stayDuration + travelDuration,
         segments
       }
+    },
+    optimizeSpotsFromStart(startPoint, spots = this.routeSpots) {
+      if (!this.hasValidLocation(startPoint)) return [...spots]
+      const remaining = spots
+        .filter(this.hasValidLocation)
+        .map(spot => ({
+          ...spot,
+          latitude: Number(spot.latitude),
+          longitude: Number(spot.longitude)
+        }))
+      const ordered = []
+      let current = {
+        latitude: Number(startPoint.latitude),
+        longitude: Number(startPoint.longitude)
+      }
+
+      while (remaining.length) {
+        let bestIndex = 0
+        let bestDistance = Infinity
+        remaining.forEach((spot, index) => {
+          const distance = this.estimateSegmentDistance(current, spot).distance
+          if (distance < bestDistance) {
+            bestDistance = distance
+            bestIndex = index
+          }
+        })
+        const next = remaining.splice(bestIndex, 1)[0]
+        ordered.push(next)
+        current = next
+      }
+
+      return ordered
     },
     distance(lat1, lon1, lat2, lon2) {
       if (!lat1 || !lon1 || !lat2 || !lon2) return 0
@@ -497,24 +535,62 @@ export default {
         uni.showToast({ title: '暂无可导航景点', icon: 'none' })
         return
       }
-      const startLocation = this.userLocation || this.getRouteStartLocation()
-      if (!this.hasValidLocation(startLocation)) {
+      const userLoc = this.userLocation || this.getRouteStartLocation()
+      if (!this.hasValidLocation(userLoc)) {
         uni.showToast({ title: '请先重新定位', icon: 'none' })
         return
       }
+      const distanceToScenic = this.calcDistanceM(
+        userLoc.latitude,
+        userLoc.longitude,
+        DEFAULT_LOCATION.latitude,
+        DEFAULT_LOCATION.longitude
+      )
+      const outsideScenicArea = distanceToScenic > SCENIC_AREA_RADIUS_M
+      const startLocation = outsideScenicArea ? { ...SCENIC_ENTRY_LOCATION } : userLoc
+      const navigationSpots = outsideScenicArea
+        ? this.optimizeSpotsFromStart(startLocation, this.routeSpots)
+        : [...this.routeSpots]
+      const navigationMetrics = this.buildRouteMetrics(navigationSpots, startLocation)
+      const startNotice = outsideScenicArea
+        ? `您距离景区约${Math.round(distanceToScenic / 1000)}公里，已从灵山胜境游客中心重新规划游览顺序。`
+        : ''
+
       uni.setStorageSync('activeRouteNavigation', {
         route_name: this.routePlan?.route_name || '游览路线',
         travel_mode: this.routePlan?.travel_mode || 'walking',
         travel_mode_label: this.routePlan?.travel_mode_label || '步行',
         start_location: startLocation,
-        waypoints: this.routeSpots.map((spot, index) => ({
+        waypoints: navigationSpots.map((spot, index) => ({
           ...spot,
           order: index + 1
         })),
-        total_distance: this.totalDistance,
-        total_duration: this.totalDuration
+        total_distance: navigationMetrics.total_distance,
+        total_duration: navigationMetrics.total_duration,
+        travel_duration: navigationMetrics.travel_duration,
+        stay_duration: navigationMetrics.stay_duration,
+        segments: navigationMetrics.segments,
+        reoptimized_from_scenic_entry: outsideScenicArea,
+        start_notice: startNotice
       })
-      uni.navigateTo({ url: '/pages/route-navigation/index' })
+
+      if (outsideScenicArea) {
+        uni.showToast({ title: startNotice, icon: 'none', duration: 3000 })
+      }
+      setTimeout(() => {
+        uni.navigateTo({ url: '/pages/route-navigation/index' })
+      }, outsideScenicArea ? 500 : 0)
+    },
+    calcDistanceM(lat1, lon1, lat2, lon2) {
+      if (![lat1, lon1, lat2, lon2].every(value => Number.isFinite(Number(value)))) return Infinity
+      const radius = 6371000
+      const dlat = (Number(lat2) - Number(lat1)) * Math.PI / 180
+      const dlon = (Number(lon2) - Number(lon1)) * Math.PI / 180
+      const a = Math.sin(dlat / 2) ** 2 +
+        Math.cos(lat1 * Math.PI / 180) *
+        Math.cos(lat2 * Math.PI / 180) *
+        Math.sin(dlon / 2) ** 2
+      return Math.round(radius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)))
     },
     async saveRoute(silent = false) {
       if (!this.routePlan || (!silent && this.savedOnce)) {

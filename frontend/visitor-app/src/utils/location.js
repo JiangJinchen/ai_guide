@@ -1,6 +1,6 @@
 export const DEFAULT_SCENIC_LOCATION = {
-  latitude: 31.43039,
-  longitude: 120.09658,
+  latitude: 31.42892,
+  longitude: 120.09487,
   name: '灵山胜境游客中心'
 }
 

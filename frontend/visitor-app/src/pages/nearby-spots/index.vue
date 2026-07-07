@@ -159,8 +159,8 @@ import { get } from '@/utils/request'
 import { formatLocationText, getLocationErrorMessage, requestCurrentLocation, saveLocation } from '@/utils/location'
 
 const DEFAULT_LOCATION = {
-  latitude: 31.43039,
-  longitude: 120.09658,
+  latitude: 31.42892,
+  longitude: 120.09487,
   name: '灵山胜境游客中心'
 }
 

@@ -73,6 +73,7 @@ QWEN_MODEL = "agnes-2.0-flash"
 AMAP_WEB_KEY = os.getenv("AMAP_WEB_KEY", "")
 AMAP_DISTANCE_URL = "https://restapi.amap.com/v3/distance"
 AMAP_WALKING_URL = "https://restapi.amap.com/v3/direction/walking"
+AMAP_GEOCODE_URL = "https://restapi.amap.com/v3/geocode/geo"
 
 EMOTION_EXPRESSION_MAP = {
     "negative": "Sad",
@@ -929,13 +930,63 @@ def fetch_amap_walking_navigation(origin, destination):
         logger.error(f"[AMAP] 高德API调用异常 - {str(e)}")
         return None
 
+def fetch_amap_geocode(address):
+    if not AMAP_WEB_KEY:
+        logger.info("[AMAP] 高德API密钥未配置，跳过地理编码")
+        return None
+
+    params = {
+        "key": AMAP_WEB_KEY,
+        "address": address,
+        "city": "无锡"
+    }
+
+    try:
+        with httpx.Client(timeout=10, verify=False) as client:
+            response = client.get(AMAP_GEOCODE_URL, params=params)
+            response.raise_for_status()
+            payload = response.json()
+
+        if payload.get("status") != "1":
+            err_code = payload.get("infocode")
+            err_msg = payload.get("info")
+            logger.warning(f"[AMAP] 地理编码失败 - status={status}, infocode={err_code}, info={err_msg}")
+            return None
+
+        geocodes = payload.get("geocodes") or []
+        if not geocodes:
+            logger.warning(f"[AMAP] 地理编码未返回结果 - address={address}")
+            return None
+
+        result = geocodes[0]
+        location = result.get("location", "")
+        if not location:
+            logger.warning(f"[AMAP] 地理编码结果无坐标 - address={address}")
+            return None
+
+        lng, lat = location.split(",")
+        logger.info(f"[AMAP] 地理编码成功 - address={address}, location=({lat}, {lng})")
+        return {
+            "latitude": float(lat),
+            "longitude": float(lng),
+            "address": result.get("formatted_address", ""),
+            "level": result.get("level", ""),
+            "city": result.get("city", "")
+        }
+    except Exception as e:
+        logger.error(f"[AMAP] 地理编码调用异常 - {str(e)}")
+        return None
+
 def build_navigation_route(request: NavigationRouteRequest):
     travel_mode = normalize_travel_mode(request.travel_mode)
     travel_config = TRAVEL_MODE_CONFIG[travel_mode]
     start = nav_point_payload(request.start)
     waypoints = [nav_point_payload(point) for point in request.waypoints]
+    
+    waypoints = reorder_waypoints(start, waypoints)
+    
     for index, point in enumerate(waypoints):
-        point["order"] = point.get("order") or index + 1
+        point["order"] = index + 1
 
     total_distance = 0
     total_duration = 0
@@ -1000,6 +1051,50 @@ def build_navigation_route(request: NavigationRouteRequest):
         "steps": all_steps,
         "segments": segments
     }
+
+def reorder_waypoints(start, waypoints):
+    if not waypoints:
+        return []
+    
+    remaining = list(waypoints)
+    ordered = []
+    current = start
+    
+    while remaining:
+        nearest = None
+        min_distance = float('inf')
+        nearest_index = -1
+        
+        for i, point in enumerate(remaining):
+            dist = haversine_distance(
+                current.get("latitude"),
+                current.get("longitude"),
+                point.get("latitude"),
+                point.get("longitude")
+            )
+            if dist < min_distance:
+                min_distance = dist
+                nearest = point
+                nearest_index = i
+        
+        if nearest is not None:
+            ordered.append(nearest)
+            remaining.pop(nearest_index)
+            current = nearest
+    
+    return ordered
+
+def haversine_distance(lat1, lon1, lat2, lon2):
+    if None in [lat1, lon1, lat2, lon2]:
+        return float('inf')
+    radius = 6371000
+    dlat = (lat2 - lat1) * math.pi / 180
+    dlon = (lon2 - lon1) * math.pi / 180
+    a = math.sin(dlat / 2) ** 2 + \
+        math.cos(lat1 * math.pi / 180) * \
+        math.cos(lat2 * math.pi / 180) * \
+        math.sin(dlon / 2) ** 2
+    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 def spot_payload(spot, db: Session = None):
     name = route_spot_name(spot)
@@ -1531,7 +1626,32 @@ async def analyze_emotion_with_llm(text: str) -> Optional[dict]:
         return None
 
 # ======================
-# 9.情感分析
+# 9.景区入口位置
+# ======================
+@router.get("/scenic/entrance")
+def get_scenic_entrance():
+    geocode_result = fetch_amap_geocode("无锡灵山胜境游客中心")
+    
+    if geocode_result:
+        return {
+            "success": True,
+            "latitude": geocode_result["latitude"],
+            "longitude": geocode_result["longitude"],
+            "name": "灵山胜境游客中心",
+            "address": geocode_result["address"],
+            "source": "amap_geocode"
+        }
+    
+    return {
+        "success": False,
+        "latitude": 31.42892,
+        "longitude": 120.09487,
+        "name": "灵山胜境游客中心",
+        "source": "fallback"
+    }
+
+# ======================
+# 10.情感分析
 # ======================
 @router.post("/emotion")
 async def analyze_emotion(text: str = Body(..., embed=True)):

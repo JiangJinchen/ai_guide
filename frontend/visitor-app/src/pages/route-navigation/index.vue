@@ -23,9 +23,13 @@
       </view>
     </view>
 
+    <view class="scenic-notice" v-if="scenicStartNotice">
+      <text>{{ scenicStartNotice }}</text>
+    </view>
+
     <view class="quick-actions">
       <button class="action-btn" @click="toggleTracking">{{ isTracking ? '暂停追踪' : '开始追踪' }}</button>
-      <button class="action-btn primary" @click="openNextWaypoint">系统地图</button>
+      <button class="action-btn" @click="openNextWaypoint">系统地图</button>
     </view>
 
     <view class="route-summary">
@@ -51,21 +55,6 @@
           <text class="metric-value">{{ waypoints.length }}</text>
           <text class="metric-label">途经点</text>
         </view>
-      </view>
-    </view>
-
-    <view class="step-card" v-if="activeStep">
-      <view class="step-head">
-        <text class="section-title">当前指引</text>
-        <text class="section-note">{{ activeStepIndex + 1 }} / {{ steps.length }}</text>
-      </view>
-      <text class="step-instruction">{{ activeStep.instruction }}</text>
-      <text class="step-meta">
-        {{ activeStep.from_name || startName }} 到 {{ activeStep.to_name || nextWaypointName }}，剩余约{{ distanceToTargetText }}
-      </text>
-      <view class="step-actions">
-        <button class="step-btn" :disabled="activeStepIndex <= 0" @click="goPreviousStep">上一步</button>
-        <button class="step-btn primary" :disabled="activeStepIndex >= steps.length - 1" @click="goNextStep">下一步</button>
       </view>
     </view>
 
@@ -104,16 +93,17 @@
 </template>
 
 <script>
-import { post } from '@/utils/request'
+import { get, post } from '@/utils/request'
 import { requestCurrentLocation } from '@/utils/location'
 import startIcon from '@/static/map/起点.png'
 import waypointIcon from '@/static/map/途经点.png'
 
 const DEFAULT_LOCATION = {
-  latitude: 31.43039,
-  longitude: 120.09658,
+  latitude: 31.426486,
+  longitude: 120.110053,
   name: '灵山胜境游客中心'
 }
+const SCENIC_AREA_RADIUS_M = 5000
 
 const ARRIVE_STEP_THRESHOLD_M = 22
 const ARRIVE_WAYPOINT_THRESHOLD_M = 35
@@ -139,7 +129,8 @@ export default {
       locationChangeHandler: null,
       trackingTimer: null,
       simulationTimer: null,
-      simulationIndex: 0
+      simulationIndex: 0,
+      hasReordered: false
     }
   },
   computed: {
@@ -226,10 +217,22 @@ export default {
     routePolyline() {
       const polyline = this.navigationData?.polyline || []
       if (polyline.length) return polyline
-      return [this.startLocation, ...this.waypoints].filter(this.isValidPoint)
+      const basePoints = []
+      if (this.isValidPoint(this.startLocation)) {
+        basePoints.push(this.startLocation)
+      }
+      if (Array.isArray(this.waypoints)) {
+        basePoints.push(...this.waypoints.filter(this.isValidPoint))
+      }
+      return basePoints
     },
     mapCenter() {
-      return this.currentLocation || this.startLocation || this.routePolyline[0] || DEFAULT_LOCATION
+      const center = this.currentLocation || this.startLocation || this.routePolyline[0] || DEFAULT_LOCATION
+      if (!this.isValidPoint(center)) return DEFAULT_LOCATION
+      return {
+        latitude: Number(center.latitude),
+        longitude: Number(center.longitude)
+      }
     },
     mapMarkers() {
       const markers = []
@@ -243,14 +246,6 @@ export default {
           width: 28,
           height: 28,
           iconPath: startIcon,
-          label: {
-            content: this.currentLocation ? '我' : '起',
-            color: '#ffffff',
-            fontSize: 12,
-            bgColor: '#8c3228',
-            borderRadius: 14,
-            padding: 5
-          },
           callout: {
             content: this.currentLocation ? '当前位置' : this.startName,
             display: 'BYCLICK',
@@ -311,18 +306,28 @@ export default {
       }]
     },
     includePoints() {
-      const polylinePoints = this.routePolyline.filter(this.isValidPoint)
-      const points = [
-        this.currentLocation,
-        this.startLocation,
-        ...this.waypoints,
-        ...polylinePoints.slice(0, 1),
-        ...polylinePoints.slice(-1)
-      ]
-      const validPoints = points
-        .filter(this.isValidPoint)
-        .map(point => ({ latitude: Number(point.latitude), longitude: Number(point.longitude) }))
-      return validPoints.length > 0 ? validPoints : []
+      try {
+        const polylinePoints = Array.isArray(this.routePolyline) ? this.routePolyline.filter(this.isValidPoint) : []
+        const rawPoints = [
+          this.currentLocation,
+          this.startLocation,
+          ...(Array.isArray(this.waypoints) ? this.waypoints : []),
+          ...polylinePoints.slice(0, 1),
+          ...polylinePoints.slice(-1)
+        ]
+        const validPoints = rawPoints
+          .filter(point => point && typeof point === 'object' && this.isValidPoint(point))
+          .map(point => ({ 
+            latitude: Number(point.latitude), 
+            longitude: Number(point.longitude) 
+          }))
+        if (process.env.UNI_PLATFORM === 'h5') {
+          return this.toAmapH5BoundsPoints(validPoints)
+        }
+        return validPoints.length > 0 ? validPoints : []
+      } catch (e) {
+        return []
+      }
     }
   },
   onLoad() {
@@ -330,7 +335,9 @@ export default {
     this.navigationPlan = plan || null
     if (this.navigationPlan) {
       this.currentLocation = this.navigationPlan.start_location || null
-      this.fetchNavigationRoute()
+      this.fetchScenicEntrance().then(() => {
+        this.fetchNavigationRoute()
+      })
     }
   },
   onUnload() {
@@ -340,7 +347,36 @@ export default {
     isValidPoint(point) {
       const lat = Number(point?.latitude)
       const lon = Number(point?.longitude)
-      return lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180
+      return Number.isFinite(lat) && Number.isFinite(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180
+    },
+    toAmapH5BoundsPoints(points) {
+      if (!Array.isArray(points) || !points.length) return []
+      let minLat = points[0].latitude
+      let maxLat = points[0].latitude
+      let minLng = points[0].longitude
+      let maxLng = points[0].longitude
+
+      points.forEach(point => {
+        minLat = Math.min(minLat, point.latitude)
+        maxLat = Math.max(maxLat, point.latitude)
+        minLng = Math.min(minLng, point.longitude)
+        maxLng = Math.max(maxLng, point.longitude)
+      })
+
+      const padding = 0.0004
+      if (minLat === maxLat) {
+        minLat -= padding
+        maxLat += padding
+      }
+      if (minLng === maxLng) {
+        minLng -= padding
+        maxLng += padding
+      }
+
+      return [
+        { latitude: minLat, longitude: minLng },
+        { latitude: maxLat, longitude: maxLng }
+      ]
     },
     pointKey(point) {
       return String(point?.spot_id || point?.id || point?.order || `${point?.latitude},${point?.longitude}`)
@@ -413,6 +449,18 @@ export default {
         if (!this.isTracking && !this.navigationCompleted) {
           this.startRealtimeTracking()
         }
+      }
+    },
+    async fetchScenicEntrance() {
+      try {
+        const res = await get('/scenic/entrance')
+        if (res && res.success && res.latitude && res.longitude) {
+          DEFAULT_LOCATION.latitude = res.latitude
+          DEFAULT_LOCATION.longitude = res.longitude
+          DEFAULT_LOCATION.name = res.name || DEFAULT_LOCATION.name
+        }
+      } catch (e) {
+        console.warn('[Navigation] 获取景区入口位置失败，使用默认位置')
       }
     },
     buildFallbackNavigation(options = {}) {
@@ -553,8 +601,40 @@ export default {
     handleLocationChange(rawLocation) {
       const location = this.normalizeTrackingLocation(rawLocation)
       if (!location || this.navigationCompleted) return
-      this.currentLocation = location
-      this.evaluateNavigationProgress(location)
+
+      const distanceToScenic = this.calcDistanceM(
+        location.latitude,
+        location.longitude,
+        DEFAULT_LOCATION.latitude,
+        DEFAULT_LOCATION.longitude
+      )
+
+      if (distanceToScenic > SCENIC_AREA_RADIUS_M) {
+        this.currentLocation = {
+          ...DEFAULT_LOCATION,
+          source: 'scenic_entry',
+          name: '灵山胜境游客中心',
+          timestamp: Date.now()
+        }
+
+        if (!this.hasReordered) {
+          this.hasReordered = true
+          uni.showToast({
+            title: '检测到您不在景区内，正在重新规划路线',
+            icon: 'none',
+            duration: 3000
+          })
+          this.fetchNavigationRoute({ 
+            startPoint: this.currentLocation,
+            remainingOnly: true,
+            keepArrived: true
+          })
+        }
+      } else {
+        this.currentLocation = location
+      }
+
+      this.evaluateNavigationProgress(this.currentLocation)
     },
     normalizeTrackingLocation(source = {}) {
       const latitude = Number(source.latitude)
@@ -679,7 +759,7 @@ export default {
       }
     },
     calcDistanceM(lat1, lon1, lat2, lon2) {
-      if (![lat1, lon1, lat2, lon2].every(value => Number.isFinite(Number(value)))) return 0
+      if (![lat1, lon1, lat2, lon2].every(value => Number.isFinite(Number(value)))) return Infinity
       const radius = 6371000
       const dlat = this.toRadians(Number(lat2) - Number(lat1))
       const dlon = this.toRadians(Number(lon2) - Number(lon1))
@@ -831,6 +911,18 @@ export default {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12rpx;
   padding: 22rpx 24rpx 0;
+}
+
+.scenic-notice {
+  margin: 20rpx 24rpx 0;
+  padding: 18rpx 22rpx;
+  border-left: 8rpx solid #8c3228;
+  border-radius: 14rpx;
+  background: #fff8e8;
+  color: #8c3228;
+  font-size: 24rpx;
+  line-height: 1.45;
+  box-shadow: 0 4rpx 18rpx rgba(55, 37, 26, 0.08);
 }
 
 .action-btn,
