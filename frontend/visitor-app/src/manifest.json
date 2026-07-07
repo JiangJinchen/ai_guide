@@ -1,0 +1,84 @@
+{
+  "name": "AI数字人智慧景区导览",
+  "appid": "__UNI__A123456",
+  "description": "基于AI数字人的智慧景区智能导览系统",
+  "versionName": "1.0.0",
+  "versionCode": "100",
+  "transformPx": false,
+  "h5": {
+    "title": "AI数字人智慧景区导览",
+    "router": {
+      "mode": "hash",
+      "base": "./"
+    },
+    "devServer": {
+      "port": 8080
+    }
+  },
+  "mp-weixin": {
+    "appid": "",
+    "setting": {
+      "urlCheck": false,
+      "es6": true,
+      "postcss": true,
+      "minified": true
+    },
+    "usingComponents": true,
+    "permission": {
+      "scope.userLocation": {
+        "desc": "您的位置信息将用于查找附近景点"
+      }
+    },
+    "requiredPrivateInfos": ["getLocation", "startLocationUpdate"]
+  },
+  "app-plus": {
+    "usingComponents": true,
+    "nvueStyleCompiler": "uni-app",
+    "compilerVersion": 3,
+    "splashscreen": {
+      "alwaysShowBeforeRender": true,
+      "waiting": true,
+      "autoclose": true,
+      "delay": 0,
+      "image": "static/logo.png"
+    },
+    "modules": {},
+    "distribute": {
+      "android": {
+        "permissions": [
+          "<uses-permission android:name=\"android.permission.ACCESS_COARSE_LOCATION\"/>",
+          "<uses-permission android:name=\"android.permission.ACCESS_FINE_LOCATION\"/>",
+          "<uses-permission android:name=\"android.permission.INTERNET\"/>",
+          "<uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\"/>",
+          "<uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\"/>",
+          "<uses-permission android:name=\"android.permission.RECORD_AUDIO\"/>",
+          "<uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\"/>"
+        ],
+        "minSdkVersion": "21",
+        "targetSdkVersion": "33",
+        "compileSdkVersion": "33",
+        "buildToolsVersion": "33.0.0",
+        "keystore": "",
+        "keystoreAlias": "",
+        "keystorePassword": "",
+        "keystoreAliasPassword": ""
+      },
+      "ios": {
+        "bundleId": "com.aiscenic.aiguide",
+        "devices": "universal",
+        "frameworks": ["CoreLocation", "MapKit", "AVFoundation"],
+        "plists": {
+          "NSLocationWhenInUseUsageDescription": "您的位置信息将用于查找附近景点",
+          "NSLocationAlwaysAndWhenInUseUsageDescription": "您的位置信息将用于查找附近景点",
+          "NSMicrophoneUsageDescription": "需要麦克风权限进行语音交互"
+        },
+        "capabilities": {
+          "location": {
+            "enable": true,
+            "always": false
+          }
+        }
+      }
+    }
+  }
+}

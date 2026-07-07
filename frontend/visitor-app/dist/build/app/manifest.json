@@ -1,0 +1,158 @@
+{
+  "@platforms": [
+    "android",
+    "iPhone",
+    "iPad"
+  ],
+  "id": "__UNI__A123456",
+  "name": "AI数字人智慧景区导览",
+  "version": {
+    "name": "1.0.0",
+    "code": "100"
+  },
+  "description": "基于AI数字人的智慧景区智能导览系统",
+  "developer": {
+    "name": "",
+    "email": "",
+    "url": ""
+  },
+  "permissions": {
+    "UniNView": {
+      "description": "UniNView原生渲染"
+    }
+  },
+  "plus": {
+    "useragent": {
+      "value": "uni-app",
+      "concatenate": true
+    },
+    "splashscreen": {
+      "target": "id:1",
+      "autoclose": true,
+      "waiting": true,
+      "delay": 0,
+      "image": "static/logo.png"
+    },
+    "popGesture": "close",
+    "launchwebview": {
+      "id": "1",
+      "kernel": "WKWebview"
+    },
+    "usingComponents": true,
+    "nvueStyleCompiler": "uni-app",
+    "compilerVersion": 3,
+    "distribute": {
+      "google": {
+        "permissions": [
+          "<uses-permission android:name=\"android.permission.ACCESS_COARSE_LOCATION\"/>",
+          "<uses-permission android:name=\"android.permission.ACCESS_FINE_LOCATION\"/>",
+          "<uses-permission android:name=\"android.permission.INTERNET\"/>",
+          "<uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\"/>",
+          "<uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\"/>",
+          "<uses-permission android:name=\"android.permission.RECORD_AUDIO\"/>",
+          "<uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\"/>"
+        ],
+        "minSdkVersion": "21",
+        "targetSdkVersion": "33",
+        "compileSdkVersion": "33",
+        "buildToolsVersion": "33.0.0",
+        "keystore": "",
+        "keystoreAlias": "",
+        "keystorePassword": "",
+        "keystoreAliasPassword": ""
+      },
+      "apple": {
+        "bundleId": "com.aiscenic.aiguide",
+        "devices": "universal",
+        "frameworks": [
+          "CoreLocation",
+          "MapKit",
+          "AVFoundation"
+        ],
+        "plists": {
+          "NSLocationWhenInUseUsageDescription": "您的位置信息将用于查找附近景点",
+          "NSLocationAlwaysAndWhenInUseUsageDescription": "您的位置信息将用于查找附近景点",
+          "NSMicrophoneUsageDescription": "需要麦克风权限进行语音交互"
+        },
+        "capabilities": {
+          "location": {
+            "enable": true,
+            "always": false
+          }
+        }
+      },
+      "plugins": {
+        "audio": {
+          "mp3": {
+            "description": "Android平台录音支持MP3格式文件"
+          }
+        }
+      }
+    },
+    "statusbar": {
+      "immersed": "supportedDevice",
+      "style": "dark",
+      "background": "#ffffff"
+    },
+    "allowsInlineMediaPlayback": true,
+    "safearea": {
+      "background": "#ffffff",
+      "bottom": {
+        "offset": "auto"
+      }
+    },
+    "uni-app": {
+      "control": "uni-v3",
+      "vueVersion": "3",
+      "compilerVersion": "4.29",
+      "nvueCompiler": "uni-app",
+      "renderer": "auto",
+      "nvue": {
+        "flex-direction": "column"
+      },
+      "nvueLaunchMode": "normal",
+      "webView": {
+        "minUserAgentVersion": "49.0"
+      }
+    },
+    "tabBar": {
+      "position": "bottom",
+      "color": "#666666",
+      "selectedColor": "#667eea",
+      "borderStyle": "rgba(0,0,0,0.4)",
+      "blurEffect": "none",
+      "fontSize": "10px",
+      "iconWidth": "24px",
+      "spacing": "3px",
+      "height": "50px",
+      "list": [
+        {
+          "pagePath": "pages/home/index",
+          "text": "首页",
+          "iconPath": "/static/tabbar/home.png",
+          "selectedIconPath": "/static/tabbar/home-active.png"
+        },
+        {
+          "pagePath": "pages/chat/index",
+          "text": "数字人",
+          "iconPath": "/static/tabbar/play.png",
+          "selectedIconPath": "/static/tabbar/play-active.png"
+        },
+        {
+          "pagePath": "pages/profile/index",
+          "text": "我的",
+          "iconPath": "/static/tabbar/user.png",
+          "selectedIconPath": "/static/tabbar/user-active.png"
+        }
+      ],
+      "backgroundColor": "#ffffff",
+      "selectedIndex": 0,
+      "shown": true,
+      "child": [
+        "lauchwebview"
+      ],
+      "selected": 0
+    }
+  },
+  "launch_path": "__uniappview.html"
+}

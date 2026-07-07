@@ -1,0 +1,21 @@
+{
+  "name": "nodejs-backend",
+  "version": "1.0.0",
+  "description": "Node.js backend for AI digital human smart scenic spot guide system",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.16.0",
+    "sse": "^0.0.8",
+    "pg": "^8.11.3",
+    "dotenv": "^16.3.1",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
