@@ -12,6 +12,7 @@ import re
 import uuid
 import json
 import math
+import itertools
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
@@ -987,6 +988,74 @@ def score_spot_for_profile(spot, profile):
     score += max(0, 24 - SPOT_ORDER_WEIGHT.get(name, 20)) * 0.08
     return score
 
+def order_route_by_distance(route, latitude=None, longitude=None, start_spot_id=None):
+    if not route:
+        return []
+
+    remaining = sorted(route, key=lambda item: item["weight"])
+    ordered = []
+
+    start_spot = None
+    if start_spot_id:
+        start_spot = next((item for item in remaining if item["id"] == start_spot_id), None)
+        if start_spot:
+            ordered.append(start_spot)
+            remaining = [item for item in remaining if item["id"] != start_spot_id]
+
+    current = start_spot or (
+        {"latitude": latitude, "longitude": longitude}
+        if latitude and longitude else None
+    )
+
+    def segment_distance(origin, destination):
+        if not origin or not origin.get("latitude") or not origin.get("longitude"):
+            return 10**9
+        if not destination.get("latitude") or not destination.get("longitude"):
+            return 10**9
+        return estimate_segment_distance_m(
+            origin["latitude"],
+            origin["longitude"],
+            destination["latitude"],
+            destination["longitude"],
+            "walking"
+        )
+
+    def route_distance(origin, spots):
+        total = 0
+        prev = origin
+        for spot in spots:
+            total += segment_distance(prev, spot)
+            prev = spot
+        return total
+
+    if current and len(remaining) <= 8:
+        best_tail = min(
+            itertools.permutations(remaining),
+            key=lambda spots: (
+                route_distance(current, spots),
+                [item["weight"] for item in spots]
+            ),
+            default=()
+        )
+        return ordered + list(best_tail)
+
+    while remaining:
+        if not current or not current.get("latitude") or not current.get("longitude"):
+            ordered.extend(remaining)
+            break
+        next_spot = min(
+            remaining,
+            key=lambda item: (
+                segment_distance(current, item),
+                item["weight"]
+            )
+        )
+        ordered.append(next_spot)
+        remaining.remove(next_spot)
+        current = next_spot
+
+    return ordered
+
 def build_route(
     name,
     route_type,
@@ -1001,9 +1070,11 @@ def build_route(
 ):
     travel_mode = normalize_travel_mode(travel_mode)
     travel_config = TRAVEL_MODE_CONFIG[travel_mode]
-    route = sorted(
+    route = order_route_by_distance(
         [spot_payload(spot, db) for spot in selected_spots],
-        key=lambda item: (0 if start_spot_id and item["id"] == start_spot_id else 1, item["weight"])
+        latitude,
+        longitude,
+        start_spot_id
     )
     total_distance = 0
     prev_lat = latitude
@@ -1062,7 +1133,7 @@ def build_route(
     else:
         model_type = "haversine_estimate"
         model_note = "未配置高德Key或接口不可用，使用球面直线距离乘以园区道路系数估算。"
-    crowd_note = "已按官方游览顺序排序，并基于当前可用距离服务计算分段距离；移动中不自动重算整条路线。"
+    crowd_note = "已从当前起点按距离优先安排游览顺序，优先选择估算总距离最短的走法以减少折返；移动中不自动重算整条路线。"
     return {
         "route_id": uuid.uuid4().hex,
         "route_name": name,
@@ -1136,7 +1207,7 @@ def route_description(preferences, must_count, over_time):
     if not parts:
         parts.append("按经典游览顺序推荐")
     timing = "，但必去点较多，预计会超过当前时间预算" if over_time else "，控制在当前时间预算内"
-    return "根据" + "，".join(parts) + timing + "，并按官方游览顺序减少折返。"
+    return "根据" + "，".join(parts) + timing + "，并从当前起点按距离优先安排顺序，尽量减少折返。"
 
 def select_route_spots(
     spots,
@@ -1255,7 +1326,7 @@ def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)
             "spot_id": request.start_spot_id
         }
         route["description"] = route_description(preferences, len(required_spots), route["is_over_time"])
-        route["strategy"] = f"先锁定生成时的起点，若起点景点在路线中则作为第一站，其余景点按必去约束、偏好匹配和官方游览顺序排序；距离与耗时按{route['travel_mode_label']}和{route['distance_model']['type']}计算，移动中不自动重算整条路线。"
+        route["strategy"] = f"先锁定生成时的起点，若起点景点在路线中则作为第一站，其余景点按估算总距离优先排序，尽量减少总距离和折返；距离与耗时按{route['travel_mode_label']}和{route['distance_model']['type']}计算，移动中不自动重算整条路线。"
         routes.append(route)
 
     routes.sort(key=lambda item: (item["is_over_time"], item["total_duration"], -item["total_spots"]))
