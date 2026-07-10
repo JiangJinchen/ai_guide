@@ -604,9 +604,11 @@ def get_spot_popularity_scores(db: Session):
         if behavior.behavior_type == 'view':
             weight += min((behavior.duration or 0) / 30, 3)
         elif behavior.behavior_type == 'favorite':
-            weight += 5.0
+            weight += 4.0
         elif behavior.behavior_type == 'share':
             weight += 3.0
+        elif behavior.behavior_type == 'navigate':
+            weight += 5.0
         spot_scores[behavior.spot_name] += weight * 10
     
     result = normalize_score_map(spot_scores)
@@ -2066,9 +2068,25 @@ def get_route_history(user_id: str = "guest", limit: int = 20, db: Session = Dep
     ]
 
 @router.post("/routes/navigation")
-def generate_navigation_route(request: NavigationRouteRequest):
+def generate_navigation_route(request: NavigationRouteRequest, db: Session = Depends(get_db)):
     if not request.waypoints:
         raise HTTPException(status_code=400, detail="请至少选择一个导航目的地")
+    
+    visitor_id = request.user_id or 'guest'
+    
+    for waypoint in request.waypoints:
+        spot_name = waypoint.name
+        spot_id = waypoint.spot_id
+        if spot_name:
+            behavior = AppUserBehavior(
+                visitor_id=visitor_id,
+                behavior_type='navigate',
+                spot_id=spot_id,
+                spot_name=spot_name
+            )
+            db.add(behavior)
+    db.commit()
+    
     return build_navigation_route(request)
 
 from time import sleep
