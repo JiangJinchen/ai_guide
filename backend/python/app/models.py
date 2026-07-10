@@ -124,6 +124,18 @@ class SpotTag(Base):
     score = Column(Integer, default=10)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+class AppUserBehavior(Base):
+    __tablename__ = "app_user_behavior"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    visitor_id = Column(String(100), index=True)
+    behavior_type = Column(String(50), index=True)
+    spot_id = Column(Integer, index=True)
+    spot_name = Column(String(255))
+    keyword = Column(String(255))
+    duration = Column(Integer)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 class SystemLog(Base):
     __tablename__ = "system_logs"
     id = Column(Integer, primary_key=True, index=True)

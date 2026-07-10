@@ -1,4 +1,4 @@
-const BASE_URL = 'http://localhost:8000/api'
+const BASE_URL = '/api'
 
 const normalizeUrl = (url) => {
   if (url.startsWith('/visitor/') || url.startsWith('/admin/') || url.startsWith('/ai/')) {
@@ -10,9 +10,10 @@ const normalizeUrl = (url) => {
 const request = (options) => {
   return new Promise((resolve, reject) => {
     const userId = uni.getStorageSync('userId') || 'guest'
+    const fullUrl = BASE_URL + normalizeUrl(options.url)
     
     uni.request({
-      url: BASE_URL + normalizeUrl(options.url),
+      url: fullUrl,
       method: options.method || 'GET',
       data: options.data || {},
       header: {
@@ -29,9 +30,9 @@ const request = (options) => {
           reject(res)
         }
       },
-      fail: (err) => {
+      fail: () => {
         uni.showToast({ title: '网络请求失败', icon: 'none' })
-        reject(err)
+        reject()
       }
     })
   })

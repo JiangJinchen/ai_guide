@@ -1,9 +1,9 @@
-from fastapi import APIRouter, HTTPException, Depends, Query, Body
+from fastapi import APIRouter, HTTPException, Depends, Query, Body, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import Spot, VisitorInteraction, VisitorBehavior, RouteHistory, RouteDistanceCache, SpotVisitMeta, SpotTag
+from app.models import Spot, VisitorInteraction, VisitorBehavior, RouteHistory, RouteDistanceCache, SpotVisitMeta, SpotTag, AppUserBehavior
 from app.schemas import SpotResponse, VisitorInteractionResponse
 from typing import List, Optional
 import os
@@ -169,12 +169,9 @@ def get_spot_guide(spot_id: int, db: Session = Depends(get_db)):
 # ==============================
 @router.post("/chat", response_model=MessageResponse)
 async def chat(request: MessageRequest, db: Session = Depends(get_db)):
-    print(f"[CHAT] 用户输入: {request.text}, 用户ID: {request.user_id}")
-    
     emotion_result = await analyze_emotion(text=request.text)
     user_emotion = emotion_result.get("emotion", "neutral")
-    print(f"[CHAT] 情感分析结果: {emotion_result}")
-    # 保存对话记录
+    
     interaction = VisitorInteraction(
         visitor_id=request.user_id,
         interaction_type="chat",
@@ -192,7 +189,6 @@ async def chat(request: MessageRequest, db: Session = Depends(get_db)):
 
     ai_text = ai_result["text"]
     if ai_text == "服务暂时不可用":
-        print(f"[CHAT] AI服务不可用，使用本地降级方案")
         from app.api.ai import local_fallback_inference
         fallback_result = await local_fallback_inference(request.text)
         ai_text = fallback_result["text"]
@@ -254,6 +250,71 @@ def submit_feedback(request: FeedbackRequest, db: Session = Depends(get_db)):
     return {"status": "ok", "message": "反馈提交成功"}
 
 # ==============================
+# 6.5 APP行为记录接口
+# ==============================
+class AppBehaviorRequest(BaseModel):
+    user_id: Optional[str] = None
+    behavior_type: str
+    spot_id: Optional[int] = None
+    spot_name: Optional[str] = None
+    keyword: Optional[str] = None
+    duration: Optional[int] = None
+
+@router.post("/behavior")
+def record_behavior(request: AppBehaviorRequest, db: Session = Depends(get_db), request_obj: Request = None):
+    """记录APP内用户行为（搜索、查看、收藏、分享等）"""
+    visitor_id = request_obj.headers.get('X-User-Id', request.user_id) if request_obj else request.user_id
+    visitor_id = visitor_id or 'guest'
+    
+    behavior = AppUserBehavior(
+        visitor_id=visitor_id,
+        behavior_type=request.behavior_type,
+        spot_id=request.spot_id,
+        spot_name=request.spot_name,
+        keyword=request.keyword,
+        duration=request.duration
+    )
+    db.add(behavior)
+    db.commit()
+    db.refresh(behavior)
+    return {"status": "ok", "message": "行为记录成功", "id": behavior.id}
+
+
+@router.post("/behavior/{behavior_id}/duration")
+def update_behavior_duration(behavior_id: int, duration: int, db: Session = Depends(get_db)):
+    """更新行为停留时长"""
+    behavior = db.query(AppUserBehavior).filter(AppUserBehavior.id == behavior_id).first()
+    if behavior:
+        behavior.duration = duration
+        db.commit()
+        return {"status": "ok", "message": "时长更新成功"}
+    return {"status": "error", "message": "行为记录不存在"}
+
+
+@router.get("/behaviors")
+def get_user_behaviors(user_id: str = "guest", db: Session = Depends(get_db)):
+    behaviors = db.query(AppUserBehavior).filter(
+        AppUserBehavior.visitor_id == user_id
+    ).order_by(AppUserBehavior.created_at.desc()).limit(20).all()
+    return {
+        "status": "ok",
+        "user_id": user_id,
+        "count": len(behaviors),
+        "behaviors": [
+            {
+                "id": b.id,
+                "behavior_type": b.behavior_type,
+                "spot_id": b.spot_id,
+                "spot_name": b.spot_name,
+                "keyword": b.keyword,
+                "duration": b.duration,
+                "created_at": b.created_at.isoformat()
+            } for b in behaviors
+        ]
+    }
+
+
+# ==============================
 # 7. 景点推荐接口
 # ==============================
 # 现有的推荐算法：关键词匹配+标签计数（只能字面匹配，无语义）
@@ -277,10 +338,44 @@ TAG_KEYWORDS = {
     "leisure_service": ["休憩", "商铺", "品鉴", "免费"]
 }
 
+TAG_LABELS = {
+    "zen_culture": "禅意文化",
+    "buddha_history": "佛教历史",
+    "architecture_art": "建筑艺术",
+    "buddha_performance": "佛教演艺",
+    "lake_scenery": "太湖风光",
+    "parent_child": "亲子互动",
+    "ancient_temple": "古寺禅修",
+    "leisure_service": "休憩服务"
+}
+
+ROUTE_TO_RECOMMENDATION_TAGS = {
+    "history": ["buddha_history", "zen_culture", "ancient_temple"],
+    "scenery": ["lake_scenery"],
+    "family": ["parent_child", "leisure_service", "buddha_performance"],
+    "architecture": ["architecture_art"],
+    "blessing": ["zen_culture", "buddha_history", "ancient_temple"]
+}
+
+SPOT_TAG_ALIASES = {
+    "history": ["buddha_history", "zen_culture"],
+    "scenery": ["lake_scenery"],
+    "family": ["parent_child", "leisure_service"],
+    "architecture": ["architecture_art"],
+    "blessing": ["zen_culture", "buddha_history"]
+}
+
 # ==========================
-# 景点标签缓存（只计算一次）
+# 缓存机制
 # ==========================
 spot_tag_cache = {}
+spot_name_map_cache = {}
+spot_name_map_cache_time = 0
+popular_tag_cache = {}
+popular_tag_cache_time = 0
+spot_popularity_cache = {}
+spot_popularity_cache_time = 0
+CACHE_EXPIRE_SECONDS = 30
 
 def precompute_all_spot_tags(db: Session):
     global spot_tag_cache
@@ -290,8 +385,441 @@ def precompute_all_spot_tags(db: Session):
     tag_records = db.query(SpotTag).all()
     for record in tag_records:
         if record.spot_id not in spot_tag_cache:
-            spot_tag_cache[record.spot_id] = []
-        spot_tag_cache[record.spot_id].append(record.tag)
+            spot_tag_cache[record.spot_id] = {}
+        for tag in SPOT_TAG_ALIASES.get(record.tag, [record.tag]):
+            if tag not in TAG_KEYWORDS:
+                continue
+            spot_tag_cache[record.spot_id][tag] = max(
+                spot_tag_cache[record.spot_id].get(tag, 0),
+                record.score or 10
+            )
+
+def get_spot_tag_scores(spot_id):
+    tags = spot_tag_cache.get(spot_id, {})
+    raw_scores = tags if isinstance(tags, dict) else {tag: 10 for tag in tags}
+    normalized = {}
+    for raw_tag, score in raw_scores.items():
+        for tag in SPOT_TAG_ALIASES.get(raw_tag, [raw_tag]):
+            if tag not in TAG_KEYWORDS:
+                continue
+            normalized[tag] = max(normalized.get(tag, 0), score or 10)
+    return normalized
+
+def normalize_score_map(scores):
+    if not scores:
+        return {}
+    max_score = max(scores.values()) if scores else 0
+    if max_score <= 0:
+        return {}
+    return {key: round(value / max_score, 4) for key, value in scores.items() if value > 0}
+
+def spot_text(spot):
+    return " ".join([
+        str(route_spot_value(spot, "spot_name", "") or route_spot_name(spot) or ""),
+        str(route_spot_value(spot, "description", "") or ""),
+        str(route_spot_value(spot, "culture_connotation", "") or ""),
+        str(route_spot_value(spot, "highlights", "") or ""),
+        str(route_spot_value(spot, "location", "") or "")
+    ])
+
+def build_spot_name_map(db: Session):
+    global spot_name_map_cache, spot_name_map_cache_time
+    import time
+    now = time.time()
+    if spot_name_map_cache and (now - spot_name_map_cache_time) < CACHE_EXPIRE_SECONDS:
+        return spot_name_map_cache
+    
+    spot_name_map_cache = {
+        spot.spot_name: spot
+        for spot in db.query(Spot).all()
+        if spot.spot_name
+    }
+    spot_name_map_cache_time = now
+    return spot_name_map_cache
+
+def add_keyword_profile_score(profile, text, weight=1.0):
+    if not text:
+        return
+    for tag, keywords in TAG_KEYWORDS.items():
+        for keyword in keywords:
+            count = str(text).count(keyword)
+            if count:
+                profile[tag] += count * weight
+
+def add_spot_tag_profile_score(profile, spot, weight=1.0):
+    if not spot:
+        return
+    for tag, tag_score in get_spot_tag_scores(spot.id).items():
+        if tag not in profile:
+            continue
+        profile[tag] += (tag_score or 10) / 10 * weight
+
+def build_user_tag_profile(db: Session, user_id: str):
+    precompute_all_spot_tags(db)
+    profile = {tag: 0.0 for tag in TAG_KEYWORDS}
+    spot_by_name = build_spot_name_map(db)
+
+    chat_history = db.query(VisitorInteraction)\
+        .filter(VisitorInteraction.visitor_id == user_id)\
+        .filter(VisitorInteraction.interaction_type == "chat")\
+        .all()
+    for chat in chat_history:
+        add_keyword_profile_score(profile, chat.content or "", 1.0)
+
+    app_behaviors = db.query(AppUserBehavior)\
+        .filter(AppUserBehavior.visitor_id == user_id)\
+        .order_by(AppUserBehavior.created_at.desc())\
+        .limit(100)\
+        .all()
+    for behavior in app_behaviors:
+        behavior_weight = 1.0
+        if behavior.behavior_type == 'view':
+            behavior_weight += min((behavior.duration or 0) / 30, 3)
+        elif behavior.behavior_type == 'favorite':
+            behavior_weight += 5.0
+        elif behavior.behavior_type == 'share':
+            behavior_weight += 3.0
+        elif behavior.behavior_type == 'search':
+            behavior_weight += 0.5
+
+        spot = spot_by_name.get(behavior.spot_name)
+        if spot:
+            add_spot_tag_profile_score(profile, spot, behavior_weight)
+        if behavior.keyword:
+            add_keyword_profile_score(profile, behavior.keyword, behavior_weight * 0.5)
+
+    route_records = db.query(RouteHistory)\
+        .filter(RouteHistory.visitor_id == (user_id or "guest"))\
+        .order_by(RouteHistory.created_at.desc())\
+        .limit(10)\
+        .all()
+    for record in route_records:
+        try:
+            route_data = json.loads(record.route_data or "{}")
+        except json.JSONDecodeError:
+            continue
+        for spot_item in route_data.get("route", []):
+            spot = spot_by_name.get(spot_item.get("name") or spot_item.get("spot_name"))
+            if spot:
+                add_spot_tag_profile_score(profile, spot, 0.8)
+            add_keyword_profile_score(profile, spot_item.get("description", ""), 0.3)
+
+    if any(profile.values()):
+        return profile
+
+    cold_profile = get_app_popular_tags(db)
+    if any(cold_profile.values()):
+        return cold_profile
+    return {"zen_culture": 1.0, **{tag: 0.0 for tag in TAG_KEYWORDS if tag != "zen_culture"}}
+
+def get_popular_tag_scores(db: Session):
+    global popular_tag_cache, popular_tag_cache_time
+    import time
+    now = time.time()
+    if popular_tag_cache and (now - popular_tag_cache_time) < CACHE_EXPIRE_SECONDS:
+        return popular_tag_cache
+
+    precompute_all_spot_tags(db)
+    tag_score = {tag: 0.0 for tag in TAG_KEYWORDS}
+    spot_by_name = build_spot_name_map(db)
+    
+    from datetime import datetime, timedelta
+    recent_date = datetime.now() - timedelta(days=30)
+    behaviors = db.query(VisitorBehavior)\
+        .filter(VisitorBehavior.visit_date >= recent_date)\
+        .limit(1000)\
+        .all()
+
+    for behavior in behaviors:
+        total = (
+            (behavior.stay_duration or 0) * 1.0
+            + (behavior.satisfaction or 0) * 10.0
+            + (behavior.total_cost or 0) * 0.1
+        )
+        if total <= 0:
+            total = 1
+        spot = spot_by_name.get(behavior.attraction_name)
+        if spot:
+            for tag, tag_weight in get_spot_tag_scores(spot.id).items():
+                tag_score[tag] += total * ((tag_weight or 10) / 10)
+        add_keyword_profile_score(
+            tag_score,
+            " ".join([
+                str(behavior.attraction_name or ""),
+                str(behavior.attraction_type or ""),
+                str(behavior.attraction_content or "")
+            ]),
+            total * 0.05
+        )
+
+    popular_tag_cache = tag_score
+    popular_tag_cache_time = now
+    return tag_score
+
+def get_app_popular_tags(db: Session):
+    tag_score = {tag: 0.0 for tag in TAG_KEYWORDS}
+    spot_by_name = build_spot_name_map(db)
+    
+    app_behaviors = db.query(AppUserBehavior)\
+        .order_by(AppUserBehavior.created_at.desc())\
+        .limit(1000)\
+        .all()
+    
+    for behavior in app_behaviors:
+        weight = 1.0
+        if behavior.behavior_type == 'view':
+            weight += min((behavior.duration or 0) / 30, 3)
+        elif behavior.behavior_type == 'favorite':
+            weight += 5.0
+        elif behavior.behavior_type == 'share':
+            weight += 3.0
+        
+        spot = spot_by_name.get(behavior.spot_name)
+        if spot:
+            for tag, tag_weight in get_spot_tag_scores(spot.id).items():
+                tag_score[tag] += weight * ((tag_weight or 10) / 10)
+        
+        if behavior.keyword:
+            add_keyword_profile_score(tag_score, behavior.keyword, weight * 0.5)
+    
+    return tag_score
+
+def get_spot_popularity_scores(db: Session):
+    global spot_popularity_cache, spot_popularity_cache_time
+    import time
+    now = time.time()
+    if spot_popularity_cache and (now - spot_popularity_cache_time) < CACHE_EXPIRE_SECONDS:
+        return spot_popularity_cache
+
+    spot_scores = {spot.spot_name: 0.0 for spot in db.query(Spot).all()}
+    
+    app_behaviors = db.query(AppUserBehavior)\
+        .order_by(AppUserBehavior.created_at.desc())\
+        .limit(1000)\
+        .all()
+    for behavior in app_behaviors:
+        if behavior.spot_name not in spot_scores:
+            continue
+        weight = 1.0
+        if behavior.behavior_type == 'view':
+            weight += min((behavior.duration or 0) / 30, 3)
+        elif behavior.behavior_type == 'favorite':
+            weight += 5.0
+        elif behavior.behavior_type == 'share':
+            weight += 3.0
+        spot_scores[behavior.spot_name] += weight * 10
+    
+    result = normalize_score_map(spot_scores)
+    spot_popularity_cache = result
+    spot_popularity_cache_time = now
+    return result
+
+def score_spot_for_recommendation(spot, normalized_profile, popularity_scores):
+    tags = get_spot_tag_scores(spot.id)
+    tag_score = 0.0
+    matched_tags = []
+    tag_contributions = []
+    
+    for tag, user_weight in normalized_profile.items():
+        if user_weight <= 0:
+            continue
+        if tag in tags:
+            spot_tag_score = tags[tag] or 10
+            contribution = user_weight * (spot_tag_score / 10) * 60
+            tag_score += contribution
+            matched_tags.append(tag)
+            tag_contributions.append({
+                'tag': tag,
+                'user_weight': user_weight,
+                'spot_tag_score': spot_tag_score,
+                'contribution': contribution
+            })
+
+    content_score = 0.0
+    matched_keywords = []
+    text = spot_text(spot)
+    for tag, user_weight in normalized_profile.items():
+        if user_weight <= 0:
+            continue
+        for keyword in TAG_KEYWORDS[tag]:
+            if keyword in text:
+                content_score += user_weight * 4
+                if keyword not in matched_keywords:
+                    matched_keywords.append(keyword)
+
+    popularity_score = popularity_scores.get(spot.spot_name, 0) * 15
+    order_score = max(0, 24 - SPOT_ORDER_WEIGHT.get(spot.spot_name, 20)) * 0.25
+    total = tag_score + content_score + popularity_score + order_score
+    
+    breakdown = {
+        'tag_score': tag_score,
+        'content_score': content_score,
+        'popularity_score': popularity_score,
+        'order_score': order_score,
+        'total': total,
+        'tag_contributions': tag_contributions,
+        'matched_keywords': matched_keywords,
+        'matched_tags': matched_tags
+    }
+    
+    return total, matched_tags, breakdown
+
+TAG_REASON_TEMPLATES = {
+    "zen_culture": [
+        "您对禅意文化的探索令人赞赏，这里是静心冥想的绝佳场所",
+        "禅意文化爱好者必访！在这里感受宁静与智慧的交融",
+        "延续您对禅意文化的探索之旅，体验东方哲学的深邃内涵",
+        "禅意氛围浓厚，适合在喧嚣中寻找内心的宁静",
+        "结合您对禅意文化的兴趣，这里的建筑与意境完美契合"
+    ],
+    "buddha_history": [
+        "佛教历史爱好者的必选之地，感受千年传承的智慧之光",
+        "您对佛教历史的探索值得深入，这里珍藏着珍贵的文化遗产",
+        "延续您对佛教历史的追寻，了解灵山胜境的深厚底蕴",
+        "佛教文化的重要遗址，每一处都诉说着千年故事",
+        "结合您对佛教历史的兴趣，这里的历史价值无可比拟"
+    ],
+    "architecture_art": [
+        "建筑艺术的巅峰之作，每一处细节都令人叹为观止",
+        "您对建筑艺术的鉴赏力令人钦佩，这里将带给您视觉盛宴",
+        "建筑艺术爱好者的天堂，融合了传统与现代的美学精髓",
+        "精美的建筑工艺，展现了人类智慧与艺术的完美结合",
+        "结合您对建筑艺术的兴趣，这里的设计堪称匠心独运"
+    ],
+    "buddha_performance": [
+        "精彩的佛教演艺不容错过，感受视听双重震撼",
+        "您对佛教文化的兴趣值得体验这场精彩演出",
+        "沉浸式佛教表演，让您身临其境地感受信仰的力量",
+        "独特的演艺形式，将佛教故事生动呈现在您面前",
+        "结合您对佛教文化的兴趣，这场演出将给您留下深刻印象"
+    ],
+    "lake_scenery": [
+        "太湖风光美不胜收，湖光山色令人心旷神怡",
+        "您对自然风光的热爱，在这里可以得到完美满足",
+        "湖景与佛文化的完美融合，展现独特的山水意境",
+        "漫步湖边，感受清风拂面的惬意时光",
+        "结合您对自然风光的兴趣，这里的湖景堪称一绝"
+    ],
+    "parent_child": [
+        "亲子互动的理想选择，让孩子在游玩中感受文化魅力",
+        "您和家人的探索之旅，这里充满了欢乐与惊喜",
+        "适合家庭出游的温馨景点，留下美好回忆",
+        "亲子同乐的好去处，寓教于乐的完美体验",
+        "结合您对亲子互动的需求，这里将带给全家人欢乐时光"
+    ],
+    "ancient_temple": [
+        "古寺禅修的宁静之地，感受千年古刹的庄严与神秘",
+        "您对传统文化的热爱，在这里可以得到深刻体验",
+        "古寺的宁静氛围，让心灵得到净化与升华",
+        "悠久的历史传承，展现了佛教文化的博大精深",
+        "结合您对古寺文化的兴趣，这里的历史厚重感令人敬畏"
+    ],
+    "leisure_service": [
+        "疲惫时的理想休憩场所，享受片刻的悠闲时光",
+        "游览途中的温馨驿站，为您补充能量继续探索",
+        "舒适的休闲环境，让您在游览之余放松身心",
+        "贴心的服务设施，让您的旅途更加舒适惬意",
+        "结合您的游览节奏，这里是放松身心的理想选择"
+    ]
+}
+
+SPOT_SPECIAL_FEATURES = {
+    "灵山大佛": ["世界最高的露天青铜释迦牟尼立像", "高88米", "祈福圣地"],
+    "灵山梵宫": ["东方卢浮宫", "艺术殿堂", "星空穹顶", "琉璃巨制"],
+    "九龙灌浴": ["动态喷泉表演", "花开见佛", "每天定时表演"],
+    "五印坛城": ["藏传佛教风格", "转经筒长廊", "唐卡艺术"],
+    "百子戏弥勒": ["青铜雕塑", "百子嬉戏", "寓意多子多福"],
+    "五智门": ["汉白玉牌坊", "佛教六度智慧", "进入核心区的标志"],
+    "阿育王柱": ["印度风格石柱", "记载佛教历史", "高16.9米"],
+    "祥符禅寺": ["千年古刹", "佛教圣地", "历史悠久"],
+    "佛足坛": ["佛足印", "摸佛足祈福", "亲子互动"],
+    "五明桥": ["五座石桥", "佛教五明智慧", "香水海倒影"],
+    "灵山大照壁": ["全国最大照壁", "赵朴初题字", "太湖风光"],
+    "拈花广场": ["大型休闲广场", "夜景灯光秀", "喷泉表演"],
+    "梵天花海": ["四季花海", "拍照打卡", "亲子游玩"],
+    "鹿鸣谷": ["自然生态", "山林步道", "亲近自然"]
+}
+
+import random
+
+def recommendation_reason(spot, matched_tags, normalized_profile, popularity_scores, breakdown=None):
+    spot_name = getattr(spot, 'spot_name', '')
+    reasons = []
+    
+    if breakdown and breakdown.get('tag_contributions'):
+        tag_contributions = sorted(breakdown['tag_contributions'], key=lambda x: x['contribution'], reverse=True)
+        for tc in tag_contributions[:2]:
+            tag_label = TAG_LABELS.get(tc['tag'], tc['tag'])
+            user_weight_pct = int(tc['user_weight'] * 100)
+            spot_tag_score = tc['spot_tag_score']
+            if user_weight_pct >= 60:
+                reasons.append(f"您对{tag_label}兴趣很高（{user_weight_pct}%），该景点此项评分{spot_tag_score}/10")
+            elif user_weight_pct >= 40:
+                reasons.append(f"您对{tag_label}有兴趣（{user_weight_pct}%），该景点此项评分{spot_tag_score}/10")
+            else:
+                reasons.append(f"您对{tag_label}略有兴趣（{user_weight_pct}%）")
+    
+    if breakdown and breakdown.get('matched_keywords'):
+        keywords = breakdown['matched_keywords'][:3]
+        if keywords:
+            reasons.append(f"景点描述包含您关注的'{keywords[0]}'等内容")
+    
+    if breakdown and breakdown.get('popularity_score', 0) > 5:
+        popularity = popularity_scores.get(spot_name, 0)
+        if popularity > 0.5:
+            reasons.append(f"近期人气较高，很多游客关注")
+        elif popularity > 0.2:
+            reasons.append(f"近期有不少游客浏览")
+    
+    if breakdown and breakdown.get('order_score', 0) > 2:
+        order = SPOT_ORDER_WEIGHT.get(spot_name, 20)
+        if order <= 5:
+            reasons.append(f"位于经典游览路线的核心位置")
+        elif order <= 10:
+            reasons.append(f"是游览路线中的重要景点")
+    
+    if spot_name in SPOT_SPECIAL_FEATURES:
+        features = SPOT_SPECIAL_FEATURES[spot_name]
+        feature = random.choice(features)
+        reasons.append(f"特色亮点：{feature}")
+    
+    if not reasons:
+        if matched_tags:
+            labels = [TAG_LABELS.get(tag, tag) for tag in matched_tags[:2]]
+            reasons.append(f"匹配您关注的{'、'.join(labels)}偏好")
+        else:
+            top_tag = next(iter(sorted(normalized_profile, key=normalized_profile.get, reverse=True)), "zen_culture")
+            reasons.append(f"根据您的{TAG_LABELS.get(top_tag, '游览')}偏好推荐")
+    
+    return "；".join(reasons[:3])
+
+def basic_recommendation_response(db: Session, user_id: str, reason="推荐系统正在使用基础景点排序。"):
+    try:
+        spots = db.query(Spot).all()[:5]
+    except Exception as exc:
+        logger.exception("[RECOMMENDATION] 基础推荐读取景点失败: %s", exc)
+        spots = []
+    if not spots:
+        spots = DEFAULT_SPOT_ROWS[:5]
+
+    return {
+        "user_id": user_id,
+        "user_preferred_tag": "zen_culture",
+        "user_preferred_tags": ["zen_culture"],
+        "user_profile": {"zen_culture": 1.0},
+        "recommendations": [
+            {
+                "id": route_spot_value(spot, "id"),
+                "spot_id": route_spot_value(spot, "id"),
+                "name": route_spot_name(spot),
+                "spot_name": route_spot_name(spot),
+                "description": route_spot_value(spot, "description", ""),
+                "reason": reason,
+                "score": 0,
+                "tags": ["禅意文化"]
+            } for spot in spots
+        ]
+    }
 
 # ==========================
 # 冷启动
@@ -301,31 +829,7 @@ def get_top_popular_tag(db: Session):
     冷启动：根据 VisitorBehavior 统计
     停留最长 + 满意度最高 + 消费最高 → 综合得出最受欢迎标签
     """
-    # 1. 获取所有行为记录，按spot_id聚合
-    behavior_stats = db.query(
-        VisitorBehavior.spot_id,
-        func.avg(VisitorBehavior.stay_duration).label("avg_stay"),
-        func.avg(VisitorBehavior.satisfaction).label("avg_satisfy"),
-        func.avg(VisitorBehavior.consumption_amount).label("avg_consume")
-    ).group_by(VisitorBehavior.spot_id).all()
-
-    # 2. 标签得分初始化
-    tag_score = {tag: 0 for tag in TAG_KEYWORDS}
-
-    # 3. 每个景点根据行为数据加权 → 加到对应标签
-    for spot_id, avg_stay, avg_satisfy, avg_consume in behavior_stats:
-        tags = spot_tag_cache.get(spot_id, [])
-        if not tags:
-            continue
-
-        # 加权总分(可调整权重)
-        total = (avg_stay or 0) * 1.0 + (avg_satisfy or 0) * 10.0 + (avg_consume or 0) * 0.1
-
-        for tag in tags:
-            if tag in tag_score:
-                tag_score[tag] += total
-
-    # 4. 得分最高 = 全国最受欢迎标签
+    tag_score = get_popular_tag_scores(db)
     if not any(tag_score.values()):
         return "zen_culture"  # 兜底默认：禅意文化
     return max(tag_score, key=tag_score.get)
@@ -335,51 +839,72 @@ def get_top_popular_tag(db: Session):
 # ==========================
 @router.get("/recommendation")
 def get_recommendation(user_id: str, db: Session = Depends(get_db)):
-    precompute_all_spot_tags(db)
+    try:
+        precompute_all_spot_tags(db)
 
-    # =============== 1. 老用户：从对话提取偏好 ===============
-    chat_history = db.query(VisitorInteraction)\
-        .filter(VisitorInteraction.visitor_id == user_id)\
-        .filter(VisitorInteraction.interaction_type == "chat")\
-        .all()
-
-    user_score = {tag: 0 for tag in TAG_KEYWORDS}
-    for chat in chat_history:
-        text = chat.content or ""
-        for tag, keywords in TAG_KEYWORDS.items():
-            for kw in keywords:
-                if kw in text:
-                    user_score[tag] += 1
-
-    preferred_tag = max(user_score, key=user_score.get) if chat_history else None
-
-    # =============== 2. 新用户：冷启动 ===============
-    if preferred_tag is None:
-        preferred_tag = get_top_popular_tag(db)
-
-    # =============== 3. 推荐：匹配标签的景点 ===============
-    all_spots = db.query(Spot).all()
-    scored = []
-    for spot in all_spots:
-        tags = spot_tag_cache.get(spot.id, [])
-        score = 10 if (preferred_tag in tags) else 0
-        scored.append((spot, score))
-
-    scored.sort(key=lambda x: x[1], reverse=True)
-    top_spots = [s[0] for s in scored[:3]]
-
-    # =============== 4. 返回 ===============
-    return {
-        "user_id": user_id,
-        "user_preferred_tag": preferred_tag,
-        "recommendations": [
-            {
-                "id": spot.id,
-                "name": spot.spot_name,
-                "description": spot.description
-            } for spot in top_spots
+        # =============== 1. 构建多标签用户画像 ===============
+        user_profile = build_user_tag_profile(db, user_id)
+        normalized_profile = normalize_score_map(user_profile)
+        preferred_tags = [
+            tag for tag, score in sorted(
+                normalized_profile.items(),
+                key=lambda item: item[1],
+                reverse=True
+            )[:3]
+            if score > 0
         ]
-    }
+        preferred_tag = preferred_tags[0] if preferred_tags else get_top_popular_tag(db)
+
+        # =============== 2. 综合评分：画像匹配 + 内容相似 + 热度 + 顺序 ===============
+        popularity_scores = get_spot_popularity_scores(db)
+        all_spots = db.query(Spot).all()
+        if not all_spots:
+            return basic_recommendation_response(
+                db,
+                user_id,
+                "景点数据尚未入库，已为您展示内置经典景点。"
+            )
+        scored = []
+        for spot in all_spots:
+            score, matched_tags, breakdown = score_spot_for_recommendation(spot, normalized_profile, popularity_scores)
+            scored.append((spot, score, matched_tags, breakdown))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        top_spots = scored[:5]
+        if not top_spots:
+            return basic_recommendation_response(db, user_id)
+
+        # =============== 3. 返回可解释推荐结果 ===============
+        return {
+            "user_id": user_id,
+            "user_preferred_tag": preferred_tag,
+            "user_preferred_tags": preferred_tags,
+            "user_profile": normalized_profile,
+            "recommendations": [
+                {
+                    "id": spot.id,
+                    "spot_id": spot.id,
+                    "name": spot.spot_name,
+                    "spot_name": spot.spot_name,
+                    "description": spot.description,
+                    "reason": recommendation_reason(spot, matched_tags, normalized_profile, popularity_scores, breakdown),
+                    "score": round(score, 2),
+                    "tags": [
+                        TAG_LABELS.get(tag, tag)
+                        for tag in (matched_tags or list(get_spot_tag_scores(spot.id).keys())[:2])
+                    ],
+                    "score_breakdown": breakdown
+                } for spot, score, matched_tags, breakdown in top_spots
+            ]
+        }
+    except Exception as exc:
+        logger.exception("[RECOMMENDATION] 个性推荐计算失败，使用基础推荐: %s", exc)
+        db.rollback()
+        return basic_recommendation_response(
+            db,
+            user_id,
+            "个性画像暂时不可用，已为您推荐景区经典景点。"
+        )
 
 # ==============================
 # 8. 游览路线规划接口
@@ -1136,6 +1661,16 @@ def score_spot_for_profile(spot, profile):
     score += max(0, 24 - SPOT_ORDER_WEIGHT.get(name, 20)) * 0.08
     return score
 
+def score_spot_tags_for_route_preferences(spot, preferences):
+    spot_id = route_spot_value(spot, "id", 0)
+    tag_scores = get_spot_tag_scores(spot_id)
+    score = 0.0
+    for preference in preferences:
+        for tag in ROUTE_TO_RECOMMENDATION_TAGS.get(preference, []):
+            if tag in tag_scores:
+                score += ((tag_scores[tag] or 10) / 10) * 4
+    return score
+
 def order_route_by_distance(route, latitude=None, longitude=None, start_spot_id=None):
     if not route:
         return []
@@ -1333,15 +1868,18 @@ def find_spots_by_ids(spots, spot_ids):
     id_set = set(spot_ids or [])
     return [spot for spot in spots if route_spot_value(spot, "id") in id_set]
 
-def score_spot_for_preferences(spot, preferences):
+def score_spot_for_preferences(spot, preferences, popularity_scores=None):
     valid_preferences = [item for item in preferences if item in ROUTE_PROFILES]
     if not valid_preferences:
         valid_preferences = ["history", "scenery", "family", "architecture", "blessing"]
 
-    score = 0
+    score = 0.0
     for preference in valid_preferences:
         score += score_spot_for_profile(spot, ROUTE_PROFILES[preference])
+    score += score_spot_tags_for_route_preferences(spot, valid_preferences)
     name = route_spot_name(spot)
+    if popularity_scores:
+        score += popularity_scores.get(name, 0) * 3
     score += max(0, 24 - SPOT_ORDER_WEIGHT.get(name, 20)) * 0.12
     return score
 
@@ -1372,10 +1910,18 @@ def select_route_spots(
 ):
     selected = list(required_spots)
     selected_ids = {route_spot_value(spot, "id") for spot in selected}
+    popularity_scores = {}
+    if db:
+        try:
+            precompute_all_spot_tags(db)
+            popularity_scores = get_spot_popularity_scores(db)
+        except Exception as exc:
+            logger.exception("[ROUTE] 偏好标签/热度评分失败，降级为关键词评分: %s", exc)
+            db.rollback()
     candidates = [
         spot for spot in sorted(
             spots,
-            key=lambda item: score_spot_for_preferences(item, preferences),
+            key=lambda item: score_spot_for_preferences(item, preferences, popularity_scores),
             reverse=True
         )
         if route_spot_value(spot, "id") not in selected_ids

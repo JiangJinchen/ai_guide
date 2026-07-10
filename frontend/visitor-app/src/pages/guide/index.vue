@@ -124,7 +124,7 @@
 </template>
 
 <script>
-import { get } from '@/utils/request'
+import { get, post } from '@/utils/request'
 
 const fallbackSpots = [
   { id: 1, spot_name: '灵山大佛', description: '太湖之滨的祈福地标。' },
@@ -140,7 +140,9 @@ export default {
       spotDetail: null,
       guideContent: null,
       spots: fallbackSpots,
-      isLoading: false
+      isLoading: false,
+      startTime: 0,
+      behaviorId: null
     }
   },
   computed: {
@@ -219,13 +221,48 @@ export default {
     }
   },
   onLoad(options) {
+    this.startTime = Date.now()
     if (options && options.spot_id) {
       this.loadSpot(Number(options.spot_id))
     } else {
       this.loadSpotsList()
     }
   },
+  onShow() {
+    if (this.spotId && !this.behaviorId && this.spotDetail) {
+      this.recordViewBehavior()
+    }
+  },
+  onUnload() {
+    if (this.spotId && this.spotDetail) {
+      const duration = Math.floor((Date.now() - this.startTime) / 1000)
+      if (this.behaviorId) {
+        this.updateBehaviorDuration(duration)
+      } else {
+        this.recordViewBehavior(duration)
+      }
+    }
+  },
   methods: {
+    recordViewBehavior(duration = null) {
+      const data = {
+        behavior_type: 'view',
+        spot_id: this.spotId,
+        spot_name: this.spotDetail.spot_name || this.spotDetail.name,
+        duration: duration
+      }
+      post('/behavior', data)
+        .then(res => {
+          if (res.id) this.behaviorId = res.id
+        })
+        .catch(() => {})
+    },
+    updateBehaviorDuration(duration) {
+      post(`/behavior/${this.behaviorId}/duration?duration=${duration}`)
+        .catch(() => {
+          this.recordViewBehavior(duration)
+        })
+    },
     async loadSpotsList() {
       try {
         const list = await get('/spots')
@@ -255,6 +292,9 @@ export default {
         }
       } finally {
         this.isLoading = false
+        if (!this.behaviorId && this.spotDetail) {
+          this.recordViewBehavior()
+        }
       }
     },
     openNavigation() {

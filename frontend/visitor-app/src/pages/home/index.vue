@@ -132,7 +132,7 @@
 </template>
 
 <script>
-import { get } from '@/utils/request'
+import { get, post } from '@/utils/request'
 
 const fallbackSpots = [
   { id: 1, name: '灵山大佛', summary: '太湖之滨的地标佛像，适合祈福与远眺。' },
@@ -257,7 +257,12 @@ export default {
         this.spots = fallbackSpots
       }
     },
-    handleSearch() {},
+    handleSearch() {
+      if (this.keyword.trim()) {
+        const behaviorData = { behavior_type: 'search', keyword: this.keyword.trim() }
+        post('/behavior', behaviorData).catch(() => {})
+      }
+    },
     clearSearch() {
       this.keyword = ''
     },
