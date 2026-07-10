@@ -13,86 +13,61 @@
 
     <view class="section-card">
       <view class="section-head">
-        <text class="section-title">偏好设置</text>
-        <text class="section-sub">本地保存</text>
+        <text class="section-title">我的游览偏好</text>
+        <text class="section-sub">基于浏览行为分析</text>
       </view>
-      <view class="setting-row">
-        <text class="setting-label">主题</text>
-        <view class="segmented">
-          <text
-            class="segment"
-            :class="{ active: preference.theme === item.value }"
-            v-for="item in themes"
-            :key="item.value"
-            @click="setPreference('theme', item.value)"
-          >
-            {{ item.label }}
-          </text>
+      <view class="profile-tags">
+        <view 
+          class="profile-tag" 
+          v-for="(score, tag) in userProfile" 
+          :key="tag"
+          :style="{ opacity: score, backgroundColor: getTagColor(tag) }"
+        >
+          <text class="tag-name">{{ getTagLabel(tag) }}</text>
+          <text class="tag-score">{{ (score * 100).toFixed(0) }}%</text>
         </view>
-      </view>
-      <view class="setting-row">
-        <text class="setting-label">数字人</text>
-        <view class="segmented">
-          <text
-            class="segment"
-            :class="{ active: preference.figure === item.value }"
-            v-for="item in figures"
-            :key="item.value"
-            @click="setPreference('figure', item.value)"
-          >
-            {{ item.label }}
-          </text>
-        </view>
-      </view>
-      <view class="setting-row">
-        <text class="setting-label">声音</text>
-        <view class="segmented">
-          <text
-            class="segment"
-            :class="{ active: preference.voice === item.value }"
-            v-for="item in voices"
-            :key="item.value"
-            @click="setPreference('voice', item.value)"
-          >
-            {{ item.label }}
-          </text>
-        </view>
-      </view>
-    </view>
-
-    <view class="section-card">
-      <view class="section-head">
-        <text class="section-title">我的预约</text>
-        <text class="section-sub">待接入预约码</text>
-      </view>
-      <view class="reservation-row" v-for="item in reservations" :key="item.name">
-        <view>
-          <text class="row-title">{{ item.name }}</text>
-          <text class="row-desc">{{ item.time }} · {{ item.status }}</text>
-        </view>
-        <text class="row-action">查看</text>
       </view>
     </view>
 
     <view class="section-card">
       <view class="section-head">
         <text class="section-title">我的游览足迹</text>
-        <text class="section-sub">地图视图预留</text>
+        <text class="section-sub">{{ footprints.length }} 个景点</text>
       </view>
-      <view class="footprint-map">
-        <view class="map-road road-a"></view>
-        <view class="map-road road-b"></view>
-        <view class="map-road road-c"></view>
+      <view class="footprint-map" v-if="footprints.length > 0">
+        <svg class="map-svg" viewBox="0 0 400 200">
+          <polyline
+            v-if="footprints.length > 1"
+            :points="svgPathPoints"
+            fill="none"
+            stroke="#8c3228"
+            stroke-width="2"
+            stroke-dasharray="5,3"
+            opacity="0.6"
+          />
+          <circle
+            v-for="(item, index) in footprints"
+            :key="'circle-' + item.spot_name"
+            :cx="item.svgX"
+            :cy="item.svgY"
+            r="8"
+            :fill="index === 0 ? '#2d5a4a' : index === footprints.length - 1 ? '#8c3228' : '#a65c3e'"
+          />
+        </svg>
         <view
-          class="map-pin"
           v-for="(item, index) in footprints"
-          :key="item.name"
-          :class="'pin-' + index"
-          @click="goToGuide(item.id)"
+          :key="'label-' + item.spot_name"
+          class="map-pin"
+          :style="{ left: (item.svgX / 4) + '%', top: (item.svgY / 2) + '%' }"
+          @click="goToGuide(item.spot_id)"
         >
-          <text class="pin-dot"></text>
-          <text class="pin-name">{{ item.name }}</text>
+          <text class="pin-name">{{ item.spot_name }}</text>
         </view>
+      </view>
+      <view class="empty-footprint" v-else>
+        <text class="empty-icon">👣</text>
+        <text class="empty-text">暂无游览记录</text>
+        <text class="empty-hint">使用导航前往景点后将记录足迹</text>
       </view>
     </view>
 
@@ -116,45 +91,24 @@
 </template>
 
 <script>
+import { get } from '@/utils/request'
+
 export default {
   data() {
     return {
       userId: '',
       nickname: '灵山游客',
       signature: '愿今日山水有好风',
-      preference: {
-        theme: 'classic',
-        figure: 'gentle',
-        voice: '女声'
-      },
-      themes: [
-        { label: '古风', value: 'classic' },
-        { label: '清雅', value: 'fresh' },
-        { label: '夜游', value: 'night' }
-      ],
-      figures: [
-        { label: '温雅', value: 'gentle' },
-        { label: '活泼', value: 'bright' },
-        { label: '沉稳', value: 'calm' }
-      ],
-      voices: [
-        { label: '女声', value: '女声' },
-        { label: '男声', value: '男声' }
-      ],
-      reservations: [
-        { name: '禅修体验', time: '今日 14:00', status: '待确认' },
-        { name: '祈福点灯', time: '明日 10:30', status: '可生成预约码' }
-      ],
-      footprints: [
-        { id: 1, name: '灵山大佛', date: '今日' },
-        { id: 2, name: '灵山梵宫', date: '昨日' },
-        { id: 3, name: '九龙灌浴', date: '本周' }
-      ]
+      userProfile: {},
+      footprints: []
     }
   },
   computed: {
     shortUserId() {
       return this.userId ? this.userId.slice(-8) : 'guest'
+    },
+    svgPathPoints() {
+      return this.footprints.map(item => `${item.svgX},${item.svgY}`).join(' ')
     }
   },
   onLoad() {
@@ -163,20 +117,68 @@ export default {
     if (saved) {
       this.nickname = saved.nickname || this.nickname
       this.signature = saved.signature || this.signature
-      this.preference = saved.preference || this.preference
     }
+    this.loadUserProfile()
+  },
+  onShow() {
+    this.loadFootprints()
   },
   methods: {
+    async loadUserProfile() {
+      try {
+        const res = await get('/recommendation', { user_id: this.userId })
+        this.userProfile = res.user_profile || {}
+      } catch (e) {
+        this.userProfile = {
+          'zen_culture': 0.75,
+          'architecture_art': 0.62,
+          'buddha_history': 0.45,
+          'lake_scenery': 0.38
+        }
+      }
+    },
+    async loadFootprints() {
+      try {
+        const res = await get('/footprints', { user_id: this.userId })
+        const data = res.footprints || []
+        this.footprints = this.convertCoords(data)
+      } catch (e) {
+        this.footprints = []
+      }
+    },
+    convertCoords(data) {
+      const minLat = 31.426
+      const maxLat = 31.434
+      const minLon = 120.094
+      const maxLon = 120.105
+      
+      return data.map(item => {
+        const lat = parseFloat(item.latitude) || 0
+        const lon = parseFloat(item.longitude) || 0
+        
+        let svgX = 50
+        let svgY = 100
+        
+        if (lat && lon) {
+          svgX = ((lon - minLon) / (maxLon - minLon)) * 320 + 40
+          svgY = ((maxLat - lat) / (maxLat - minLat)) * 160 + 20
+        } else {
+          svgX = 40 + Math.random() * 320
+          svgY = 20 + Math.random() * 160
+        }
+        
+        return {
+          ...item,
+          svgX: Math.round(svgX),
+          svgY: Math.round(svgY)
+        }
+      })
+    },
     saveProfile() {
       uni.setStorageSync('visitorProfile', {
         nickname: this.nickname || '灵山游客',
-        signature: this.signature || '愿今日山水有好风',
-        preference: this.preference
+        signature: this.signature || '愿今日山水有好风'
       })
-    },
-    setPreference(key, value) {
-      this.preference = { ...this.preference, [key]: value }
-      this.saveProfile()
     },
     goToGuide(id) {
       uni.navigateTo({ url: `/pages/guide/index?spot_id=${id}` })
@@ -204,6 +206,32 @@ export default {
           }
         }
       })
+    },
+    getTagLabel(tag) {
+      const labels = {
+        'zen_culture': '禅意文化',
+        'buddha_history': '佛教历史',
+        'architecture_art': '建筑艺术',
+        'buddha_performance': '佛教表演',
+        'lake_scenery': '湖景风光',
+        'parent_child': '亲子互动',
+        'ancient_temple': '古寺文化',
+        'leisure_service': '休闲服务'
+      }
+      return labels[tag] || tag
+    },
+    getTagColor(tag) {
+      const colors = {
+        'zen_culture': '#8c3228',
+        'buddha_history': '#a65c3e',
+        'architecture_art': '#37251a',
+        'buddha_performance': '#5a4a3a',
+        'lake_scenery': '#2d5a4a',
+        'parent_child': '#b8860b',
+        'ancient_temple': '#4a3728',
+        'leisure_service': '#6b4423'
+      }
+      return colors[tag] || '#8c3228'
     }
   }
 }
@@ -309,40 +337,30 @@ export default {
   font-size: 22rpx;
 }
 
-.setting-row {
-  padding: 16rpx 0;
-}
-
-.setting-label {
-  display: block;
-  margin-bottom: 14rpx;
-  color: #6d5542;
-  font-size: 24rpx;
-}
-
-.segmented {
+.profile-tags {
   display: flex;
-  gap: 12rpx;
+  flex-wrap: wrap;
+  gap: 16rpx;
 }
 
-.segment {
-  flex: 1;
-  height: 62rpx;
+.profile-tag {
   display: flex;
   align-items: center;
-  justify-content: center;
-  border-radius: 8rpx;
-  background: #efe0bd;
-  color: #6a4b2f;
-  font-size: 24rpx;
-}
-
-.segment.active {
-  background: #8c3228;
+  padding: 12rpx 24rpx;
+  border-radius: 24rpx;
   color: #fff8e8;
 }
 
-.reservation-row,
+.tag-name {
+  font-size: 26rpx;
+  margin-right: 8rpx;
+}
+
+.tag-score {
+  font-size: 24rpx;
+  opacity: 0.9;
+}
+
 .menu-row {
   display: flex;
   align-items: center;
@@ -352,30 +370,16 @@ export default {
   border-bottom: 1rpx solid rgba(121, 74, 38, 0.1);
 }
 
-.reservation-row:last-child,
 .menu-row:last-child {
   border-bottom: none;
 }
 
-.row-title,
-.row-desc {
-  display: block;
-}
-
-.row-title,
 .menu-title {
   color: #3f2b20;
   font-size: 27rpx;
   font-weight: 800;
 }
 
-.row-desc {
-  margin-top: 8rpx;
-  color: #806b55;
-  font-size: 23rpx;
-}
-
-.row-action,
 .menu-arrow {
   flex-shrink: 0;
   color: #9b7448;
@@ -393,34 +397,12 @@ export default {
     linear-gradient(135deg, #ead9b9, #d8be86);
 }
 
-.map-road {
+.map-svg {
   position: absolute;
-  background: rgba(115, 77, 43, 0.2);
-  border-radius: 999rpx;
-}
-
-.road-a {
-  left: -40rpx;
-  right: 60rpx;
-  top: 150rpx;
-  height: 10rpx;
-  transform: rotate(-12deg);
-}
-
-.road-b {
-  left: 250rpx;
-  top: -30rpx;
-  width: 10rpx;
-  height: 420rpx;
-  transform: rotate(24deg);
-}
-
-.road-c {
-  left: 80rpx;
-  right: -60rpx;
-  top: 238rpx;
-  height: 8rpx;
-  transform: rotate(16deg);
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
 }
 
 .map-pin {
@@ -428,32 +410,41 @@ export default {
   display: flex;
   align-items: center;
   gap: 8rpx;
-  padding: 8rpx 12rpx;
+  padding: 6rpx 16rpx;
   border-radius: 999rpx;
-  background: rgba(255, 248, 232, 0.88);
-  box-shadow: 0 8rpx 18rpx rgba(75, 43, 24, 0.14);
+  background: rgba(255, 248, 232, 0.92);
+  box-shadow: 0 4rpx 12rpx rgba(75, 43, 24, 0.12);
+  transform: translate(-10rpx, -50%);
+  white-space: nowrap;
 }
 
-.pin-0 {
-  left: 68rpx;
-  top: 92rpx;
+.pin-name {
+  font-size: 24rpx;
+  color: #4b2c1f;
+  font-weight: 600;
 }
 
-.pin-1 {
-  right: 80rpx;
-  top: 150rpx;
+.empty-footprint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 40rpx 0;
 }
 
-.pin-2 {
-  left: 210rpx;
-  bottom: 54rpx;
+.empty-icon {
+  font-size: 60rpx;
+  margin-bottom: 16rpx;
 }
 
-.pin-dot {
-  width: 18rpx;
-  height: 18rpx;
-  border-radius: 50%;
-  background: #8c3228;
+.empty-text {
+  font-size: 28rpx;
+  color: #37251a;
+  margin-bottom: 8rpx;
+}
+
+.empty-hint {
+  font-size: 24rpx;
+  color: #8b7355;
 }
 
 .pin-name {

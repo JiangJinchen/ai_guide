@@ -25,6 +25,22 @@
       }
     },
     {
+      "path": "pages/ticket-assistant/index",
+      "style": {
+        "navigationBarTitleText": "票务助手",
+        "navigationBarBackgroundColor": "#ffffff",
+        "navigationBarTextStyle": "black"
+      }
+    },
+    {
+      "path": "pages/activity-service/index",
+      "style": {
+        "navigationBarTitleText": "活动服务",
+        "navigationBarBackgroundColor": "#ffffff",
+        "navigationBarTextStyle": "black"
+      }
+    },
+    {
       "path": "pages/route-detail/index",
       "style": {
         "navigationBarTitleText": "路线详情",

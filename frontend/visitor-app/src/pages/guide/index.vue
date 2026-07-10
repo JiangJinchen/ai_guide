@@ -60,18 +60,6 @@
           </view>
         </view>
 
-        <view class="section-card">
-          <text class="section-title">票务与预约</text>
-          <view class="plain-row">
-            <text class="plain-label">门票</text>
-            <text class="plain-value">{{ ticketInfo }}</text>
-          </view>
-          <view class="plain-row">
-            <text class="plain-label">预约</text>
-            <text class="plain-value">{{ reserveInfo }}</text>
-          </view>
-        </view>
-
         <view class="section-card" v-if="performances.length">
           <view class="title-row">
             <text class="section-title">演出日程</text>
@@ -141,6 +129,7 @@ export default {
       guideContent: null,
       spots: fallbackSpots,
       nearbyData: null,
+      popularityData: null,
       isLoading: false,
       startTime: 0,
       behaviorId: null
@@ -166,22 +155,20 @@ export default {
       return ['代表性视角拍照', '听取文化讲解', '参与祈福体验', '留意建筑细节']
     },
     crowdLevel() {
-      const levels = ['舒适', '适中', '较热闹']
-      return `人流 ${levels[(this.spotDetail?.id || 0) % levels.length]}`
+      if (this.popularityData) {
+        return `热度 ${this.popularityData.popularity_level}`
+      }
+      const levels = ['舒适', '适中', '热门']
+      return `热度 ${levels[(this.spotDetail?.id || 0) % levels.length]}`
     },
     keyInfo() {
+      const popularity = this.popularityData?.popularity_level || '适中'
       return [
         { label: '开放', value: this.spotDetail?.open_info || '以景区当日公告为准' },
         { label: '建议停留', value: this.spotName.includes('梵宫') ? '45-70分钟' : '25-45分钟' },
         { label: '适合', value: this.spotName.includes('九龙') ? '亲子 / 表演' : '祈福 / 拍照' },
-        { label: '热度', value: this.crowdLevel.replace('人流 ', '') }
+        { label: '热度', value: popularity }
       ]
-    },
-    ticketInfo() {
-      return this.spotName.includes('梵宫') ? '含在景区门票内，特殊演出以现场票务为准' : '通常随景区门票入园'
-    },
-    reserveInfo() {
-      return this.spotName.includes('体验') ? '建议提前预约' : '当前无需单独预约，后续可接入预约码'
     },
     performances() {
       if (this.spotName.includes('梵宫')) {
@@ -297,17 +284,20 @@ export default {
       this.isLoading = true
       this.spotId = id
       this.nearbyData = null
+      this.popularityData = null
       if (!this.spots.length) await this.loadSpotsList()
 
       try {
-        const [spot, guide, nearby] = await Promise.all([
+        const [spot, guide, nearby, popularity] = await Promise.all([
           get(`/spots/${id}`),
           get(`/guide/${id}`),
-          get(`/spots/${id}/nearby`)
+          get(`/spots/${id}/nearby`),
+          get(`/spots/${id}/popularity`)
         ])
         this.spotDetail = spot
         this.guideContent = guide
         this.nearbyData = nearby
+        this.popularityData = popularity
       } catch (e) {
         const fallback = fallbackSpots.find(item => item.id === id) || fallbackSpots[0]
         this.spotDetail = fallback
@@ -326,6 +316,7 @@ export default {
       const lat = Number(this.spotDetail?.latitude)
       const lon = Number(this.spotDetail?.longitude)
       if (lat && lon) {
+        this.recordNavigateBehavior()
         uni.openLocation({
           latitude: lat,
           longitude: lon,
@@ -335,6 +326,14 @@ export default {
       } else {
         uni.showToast({ title: '后续接入地图导航', icon: 'none' })
       }
+    },
+    recordNavigateBehavior() {
+      const data = {
+        behavior_type: 'navigate',
+        spot_id: this.spotId,
+        spot_name: this.spotDetail.spot_name || this.spotDetail.name || this.spotName
+      }
+      post('/behavior', data).catch(() => {})
     },
     openNearby(item) {
       if (item.type === 'spot') {

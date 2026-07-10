@@ -523,12 +523,21 @@ export default {
         uni.showToast({ title: '暂无可导航位置', icon: 'none' })
         return
       }
+      this.recordNavigateBehavior(spot)
       uni.openLocation({
         latitude: Number(spot.latitude),
         longitude: Number(spot.longitude),
         name: spot.name,
         address: spot.location || '灵山胜境景区内'
       })
+    },
+    recordNavigateBehavior(spot) {
+      const data = {
+        behavior_type: 'navigate',
+        spot_id: spot.id,
+        spot_name: spot.name
+      }
+      post('/behavior', data).catch(() => {})
     },
     navigateFullRoute() {
       if (!this.routeSpots.length) {

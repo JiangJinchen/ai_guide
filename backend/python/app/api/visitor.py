@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import Spot, VisitorInteraction, VisitorBehavior, RouteHistory, RouteDistanceCache, SpotVisitMeta, SpotTag, AppUserBehavior
+from app.models import Spot, VisitorInteraction, VisitorBehavior, RouteHistory, RouteDistanceCache, SpotVisitMeta, SpotTag, AppUserBehavior, TicketProduct, ScenicActivity
 from app.schemas import SpotResponse, VisitorInteractionResponse
 from typing import List, Optional
 import os
@@ -14,6 +14,7 @@ import json
 import math
 import itertools
 import logging
+from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
@@ -45,6 +46,233 @@ def amap_rate_limited(func):
     return wrapper
 
 router = APIRouter()
+
+TICKET_SOURCE_LABELS = {
+    "official": "景区官方渠道",
+    "ota": "第三方票务平台",
+    "manual": "管理端人工维护"
+}
+
+ACTIVITY_TYPE_LABELS = {
+    "performance": "演出时间",
+    "zen": "禅修体验"
+}
+
+DEFAULT_SCENIC_ACTIVITIES = [
+    {
+        "id": -101,
+        "name": "九龙灌浴",
+        "activity_type": "performance",
+        "location": "九龙灌浴广场",
+        "latitude": 31.424188,
+        "longitude": 120.098569,
+        "schedule_times": ["10:00", "11:30", "14:00", "15:45"],
+        "duration_minutes": 20,
+        "content": "演出以佛教故事为背景，结合音乐、水景与动态装置，建议提前到达选择观赏位置。",
+        "significance": "九龙灌浴是灵山胜境的标志性演出，再现了释迦牟尼诞生时九龙吐水沐浴的神圣场景，表达了对生命的敬畏与祈福的美好愿望。",
+        "is_active": True
+    },
+    {
+        "id": -102,
+        "name": "梵宫吉祥颂",
+        "activity_type": "performance",
+        "location": "灵山梵宫",
+        "latitude": 31.427704,
+        "longitude": 120.102195,
+        "schedule_times": ["09:30", "13:30", "15:00"],
+        "duration_minutes": 35,
+        "content": "演出场次和入场安排受当日客流影响，建议结合路线规划预留入场时间。",
+        "significance": "吉祥颂是梵宫内的文化盛宴，通过声光电等现代技术与传统艺术相结合，展现佛教文化的博大精深与艺术魅力。",
+        "is_active": True
+    },
+    {
+        "id": -201,
+        "name": "禅修体验",
+        "activity_type": "zen",
+        "location": "景区服务台咨询",
+        "latitude": 31.43039,
+        "longitude": 120.09658,
+        "schedule_times": [],
+        "duration_minutes": 60,
+        "content": "本系统仅展示体验介绍和咨询地点，具体参与方式以官方渠道或现场服务台为准。",
+        "significance": "禅修体验旨在帮助游客在繁忙的生活中寻找内心的宁静，通过静心冥想等方式感受禅文化的独特魅力，获得身心的放松与升华。",
+        "is_active": True
+    }
+]
+
+DEFAULT_TICKET_PRODUCTS = [
+    {
+        "id": 0,
+        "name": "灵山胜境成人票",
+        "ticket_type": "scenic_ticket",
+        "audience": "成人",
+        "price": 210,
+        "official_notice": "当前为票务信息服务示例，实际票价、优惠和开放状态请以景区官方渠道或授权票务平台为准。",
+        "is_active": True
+    },
+    {
+        "id": -1,
+        "name": "景区观光车票",
+        "ticket_type": "sightseeing_bus",
+        "audience": "游客",
+        "price": 0,
+        "official_notice": "观光车班次、站点、票价和停运信息受客流与天气影响，请以现场售票处公告为准。",
+        "is_active": True
+    }
+]
+
+TICKET_SERVICE_POINT_IDS = {
+    "center-2",
+    "center-3",
+    "center-6",
+    "center-9",
+    "center-11",
+    "center-12",
+    "center-13",
+    "center-14",
+    "center-15",
+    "center-16"
+}
+
+def serialize_ticket_product(ticket):
+    if isinstance(ticket, dict):
+        item = dict(ticket)
+    else:
+        item = {
+            "id": ticket.id,
+            "name": ticket.name,
+            "ticket_type": ticket.ticket_type,
+            "audience": ticket.audience,
+            "price": ticket.price,
+            "official_notice": ticket.official_notice,
+            "is_active": ticket.is_active
+        }
+    return item
+
+def get_ticket_service_locations():
+    return [point for point in NEARBY_SERVICE_POINTS if point["id"] in TICKET_SERVICE_POINT_IDS]
+
+def normalize_schedule_times(value):
+    if not value:
+        return []
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        try:
+            raw_items = json.loads(value)
+        except Exception:
+            raw_items = re.split(r"[,，、\s]+", str(value))
+
+    times = []
+    for item in raw_items:
+        text = str(item).strip()
+        if re.match(r"^\d{1,2}:\d{2}$", text):
+            hour, minute = text.split(":")
+            times.append(f"{int(hour):02d}:{minute}")
+    return sorted(set(times))
+
+def serialize_activity(activity):
+    if isinstance(activity, dict):
+        item = dict(activity)
+    else:
+        item = {
+            "id": activity.id,
+            "activity_type": activity.activity_type,
+            "name": activity.name,
+            "location": activity.location,
+            "latitude": activity.latitude,
+            "longitude": activity.longitude,
+            "schedule_times": normalize_schedule_times(activity.schedule_times),
+            "duration_minutes": activity.duration_minutes,
+            "content": activity.content,
+            "significance": activity.significance,
+            "is_active": activity.is_active
+        }
+    item["schedule_times"] = normalize_schedule_times(item.get("schedule_times"))
+    item["activity_type_label"] = ACTIVITY_TYPE_LABELS.get(item.get("activity_type"), "活动")
+    return item
+
+def get_activity_source(db: Session, activity_type: Optional[str] = None):
+    query = db.query(ScenicActivity).filter(ScenicActivity.is_active == True)
+    if activity_type:
+        query = query.filter(ScenicActivity.activity_type == activity_type)
+    rows = query.order_by(ScenicActivity.id.asc()).all()
+    if rows:
+        return rows
+    return [
+        item for item in DEFAULT_SCENIC_ACTIVITIES
+        if not activity_type or item["activity_type"] == activity_type
+    ]
+
+@router.get("/activities")
+def get_activities(db: Session = Depends(get_db), activity_type: Optional[str] = None):
+    return {
+        "items": [serialize_activity(item) for item in get_activity_source(db, activity_type)],
+        "trusted_sources": ["景区官方小程序", "景区官方公告", "管理端人工维护"],
+        "risk_notice": "活动时间、体验名额和临时调整以景区当日官方公告为准。"
+    }
+
+@router.get("/activities/upcoming")
+def get_upcoming_performances(db: Session = Depends(get_db), limit: int = 4):
+    now_text = datetime.now().strftime("%H:%M")
+    upcoming = []
+    for activity in get_activity_source(db, "performance"):
+        item = serialize_activity(activity)
+        for time_text in item.get("schedule_times", []):
+            if time_text >= now_text:
+                upcoming.append({
+                    **item,
+                    "event_time": time_text,
+                    "display_time": time_text,
+                    "time_status": "upcoming"
+                })
+
+    upcoming.sort(key=lambda item: (item["event_time"], item.get("id") or 0))
+    return {
+        "server_time": datetime.now().isoformat(),
+        "refresh_interval_seconds": 300,
+        "items": upcoming[:max(1, min(limit, 10))],
+        "empty_text": "今日暂无未开始演出，请以景区当日公告为准。"
+    }
+
+@router.get("/activities/{activity_id}")
+def get_activity_detail(activity_id: int, db: Session = Depends(get_db)):
+    if activity_id > 0:
+        activity = db.query(ScenicActivity).filter(
+            ScenicActivity.id == activity_id,
+            ScenicActivity.is_active == True
+        ).first()
+        if activity:
+            return serialize_activity(activity)
+
+    for item in DEFAULT_SCENIC_ACTIVITIES:
+        if item["id"] == activity_id:
+            return serialize_activity(item)
+    raise HTTPException(status_code=404, detail="活动不存在")
+
+@router.get("/ticket-assistant")
+def get_ticket_assistant(db: Session = Depends(get_db), ticket_type: Optional[str] = None):
+    query = db.query(TicketProduct).filter(TicketProduct.is_active == True)
+    if ticket_type:
+        query = query.filter(TicketProduct.ticket_type == ticket_type)
+    products = query.order_by(TicketProduct.id.asc()).all()
+    if not products:
+        products = [
+            item for item in DEFAULT_TICKET_PRODUCTS
+            if not ticket_type or item["ticket_type"] == ticket_type
+        ]
+
+    return {
+        "positioning": "票务助手只提供门票、观光车票、套票信息，不承接支付、出票、退票和核销。",
+        "trusted_sources": [
+            "景区官方渠道",
+            "第三方票务平台",
+            "管理端人工维护"
+        ],
+        "updated_at": datetime.now().isoformat(),
+        "products": [serialize_ticket_product(item) for item in products],
+        "service_locations": get_ticket_service_locations()
+    }
 
 class MessageRequest(BaseModel):
     text: str
@@ -147,6 +375,30 @@ def get_spot_detail(spot_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="景点不存在")
     return spot
 
+@router.get("/spots/{spot_id}/popularity")
+def get_spot_popularity(spot_id: int, db: Session = Depends(get_db)):
+    spot = db.query(Spot).filter(Spot.id == spot_id).first()
+    if not spot:
+        raise HTTPException(status_code=404, detail="景点不存在")
+    
+    popularity_scores = get_spot_popularity_scores(db)
+    score = popularity_scores.get(spot.spot_name, 0.0)
+    
+    if score >= 0.7:
+        level = "热门"
+    elif score >= 0.4:
+        level = "适中"
+    else:
+        level = "舒适"
+    
+    return {
+        "spot_id": spot_id,
+        "spot_name": spot.spot_name,
+        "popularity_score": score,
+        "popularity_level": level,
+        "popularity_percent": round(score * 100)
+    }
+
 NEARBY_SERVICE_POINTS = [
     {"id": "food-1", "name": "香月花街素食馆", "type": "food", "desc": "景区内特色素食餐厅", "latitude": 31.42822, "longitude": 120.10282},
     {"id": "food-2", "name": "梵宫简餐点", "type": "food", "desc": "梵宫附近便捷餐饮", "latitude": 31.43066, "longitude": 120.1009},
@@ -194,6 +446,7 @@ NEARBY_SERVICE_POINTS = [
 
     {"id": "parking-1", "name": "东入口停车场", "type": "parking", "desc": "景区主入口停车场", "latitude": 31.42858, "longitude": 120.09422},
     {"id": "parking-2", "name": "南区停车场", "type": "parking", "desc": "大型露天停车场", "latitude": 31.42696, "longitude": 120.0962},
+    {"id": "parking-3", "name": "拈花湾南1门停车场", "type": "parking", "desc": "大型露天停车场", "latitude": 31.388713, "longitude": 120.081097},
 
     {"id": "toilet-1", "name": "入口卫生间", "type": "toilet", "desc": "景区入口处卫生间", "latitude": 31.420612, "longitude": 120.103676},
     {"id": "toilet-2", "name": "大佛广场卫生间", "type": "toilet", "desc": "大佛广场附近卫生间", "latitude": 31.43292, "longitude": 120.09928},
@@ -210,7 +463,7 @@ NEARBY_SERVICE_POINTS = [
     {"id": "center-1", "name": "游客服务中心", "type": "center", "desc": "景区综合服务中心", "latitude": 31.43039, "longitude": 120.09658},
     {"id": "center-2", "name": "售票处", "type": "center", "desc": "景区售票处", "latitude": 31.420119, "longitude": 120.102935},
     {"id": "center-3", "name": "观光车售票处", "type": "center", "desc":"观光车售票处", "latitude": 31.420176, "longitude": 120.103123},
-    {"id": "center-4", "name": "南门", "type": "center", "desc":"南门入口", "latitude": 31.420502, "longitude": 120.103079},
+    {"id": "center-4", "name": "灵山胜境南门", "type": "center", "desc":"灵山胜境南门入口", "latitude": 31.420502, "longitude": 120.103079},
     {"id": "center-5", "name": "灵山景区红十字救护站", "type": "center", "desc":"灵山景区红十字救护站", "latitude": 31.420057, "longitude": 120.103146},
     {"id": "center-6", "name": "观光车候车亭（大照壁起始站）", "type": "center", "desc":"观光车候车亭（大照壁起始站）", "latitude": 31.421141, "longitude": 120.102718},
     {"id": "center-7", "name": "公用电话", "type": "center", "desc":"公用电话", "latitude": 31.421839, "longitude": 120.101912},
@@ -223,7 +476,12 @@ NEARBY_SERVICE_POINTS = [
     {"id": "center-14", "name": "观光车候车亭（佛手广场站）", "type": "center", "desc":"观光车候车亭（佛手广场站）", "latitude": 31.426494, "longitude": 120.09857},
     {"id": "center-15", "name": "观光车候车亭（杏坛广场站）", "type": "center", "desc":"观光车候车亭（杏坛广场站）", "latitude": 31.428386, "longitude": 120.096755},
     {"id": "center-16", "name": "观光车候车亭（九龙灌浴站）", "type": "center", "desc":"观光车候车亭（九龙灌浴站）", "latitude": 31.424188, "longitude": 120.098569},
-    {"id": "center-17", "name": "拈花湾景区接待中心", "type": "center", "desc":"抓花湾景区接待中心", "latitude": 31.419471, "longitude": 120.07873}
+    {"id": "center-17", "name": "拈花湾景区接待中心", "type": "center", "desc":"拈花湾景区接待中心", "latitude": 31.419471, "longitude": 120.07873},
+    {"id": "center-18", "name": "拈花湾东门", "type": "center", "desc":"拈花湾东门", "latitude": 31.384153, "longitude": 120.077602},
+    {"id": "center-19", "name": "拈花湾南1门", "type": "center", "desc":"拈花湾南1门", "latitude": 31.388809, "longitude": 120.081136},
+    {"id": "center-20", "name": "卫莱电汽车充电站", "type": "center", "desc":"卫莱电汽车充电站", "latitude": 31.391864, "longitude": 120.081471},
+    {"id": "center-21", "name": "拈花湾东南门", "type": "center", "desc":"拈花湾东南门", "latitude": 31.392597, "longitude": 120.084562},
+    {"id": "center-22", "name": "拈花湾西北门", "type": "center", "desc":"摘花湾西北门", "latitude": 31.395692, "longitude": 120.079279},
 ]
 
 @router.get("/spots/{spot_id}/nearby")
@@ -540,6 +798,34 @@ def get_user_behaviors(user_id: str = "guest", db: Session = Depends(get_db)):
                 "created_at": b.created_at.isoformat()
             } for b in behaviors
         ]
+    }
+
+
+@router.get("/footprints")
+def get_user_footprints(user_id: str = "guest", db: Session = Depends(get_db)):
+    behaviors = db.query(AppUserBehavior).filter(
+        AppUserBehavior.visitor_id == user_id,
+        AppUserBehavior.behavior_type == "navigate"
+    ).order_by(AppUserBehavior.created_at.asc()).all()
+    
+    visited_spots = {}
+    for b in behaviors:
+        if b.spot_name and b.spot_name not in visited_spots:
+            coords = SPOT_COORDS.get(b.spot_name, {})
+            visited_spots[b.spot_name] = {
+                "spot_id": b.spot_id,
+                "spot_name": b.spot_name,
+                "latitude": coords.get("latitude"),
+                "longitude": coords.get("longitude"),
+                "visited_at": b.created_at.isoformat()
+            }
+    
+    footprints = list(visited_spots.values())
+    return {
+        "status": "ok",
+        "user_id": user_id,
+        "count": len(footprints),
+        "footprints": footprints
     }
 
 

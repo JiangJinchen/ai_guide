@@ -22,6 +22,36 @@ class DigitalHumanConfig(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
+class TicketProduct(Base):
+    __tablename__ = "ticket_products"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    ticket_type = Column(String(50), index=True, default="scenic_ticket")
+    audience = Column(String(100), default="成人")
+    price = Column(Float, nullable=False, default=0)
+    official_notice = Column(Text)
+    is_active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+class ScenicActivity(Base):
+    __tablename__ = "scenic_activities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    activity_type = Column(String(50), index=True, nullable=False)
+    name = Column(String(255), nullable=False)
+    location = Column(String(255), nullable=False)
+    latitude = Column(Float)
+    longitude = Column(Float)
+    schedule_times = Column(Text)
+    duration_minutes = Column(Integer)
+    content = Column(Text)
+    significance = Column(Text)
+    is_active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
 class VisitorInteraction(Base):
     __tablename__ = "visitor_interaction"
     id = Column(Integer, primary_key=True, index=True)

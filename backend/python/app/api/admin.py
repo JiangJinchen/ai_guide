@@ -3,8 +3,10 @@ from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import Knowledge, DigitalHumanConfig, VisitorInteraction, SystemLog
+from app.models import Knowledge, DigitalHumanConfig, VisitorInteraction, SystemLog, TicketProduct, ScenicActivity
 from datetime import datetime
+import json
+import re
 
 router = APIRouter()
 
@@ -31,6 +33,64 @@ class DigitalHumanConfigUpdate(BaseModel):
     voice: str | None = None
     clothes: str | None = None
     is_active: bool | None = None
+
+class TicketProductItem(BaseModel):
+    name: str
+    ticket_type: str = "scenic_ticket"
+    audience: str = "成人"
+    price: float = 0
+    official_notice: str | None = None
+    is_active: bool = True
+
+class TicketProductUpdate(BaseModel):
+    name: str | None = None
+    ticket_type: str | None = None
+    audience: str | None = None
+    price: float | None = None
+    official_notice: str | None = None
+    is_active: bool | None = None
+
+class ScenicActivityItem(BaseModel):
+    activity_type: str
+    name: str
+    location: str
+    latitude: float | None = None
+    longitude: float | None = None
+    schedule_times: str | None = None
+    duration_minutes: int | None = None
+    content: str | None = None
+    significance: str | None = None
+    is_active: bool = True
+
+class ScenicActivityUpdate(BaseModel):
+    activity_type: str | None = None
+    name: str | None = None
+    location: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    schedule_times: str | None = None
+    duration_minutes: int | None = None
+    content: str | None = None
+    significance: str | None = None
+    is_active: bool | None = None
+
+def validate_activity_type(activity_type: str):
+    if activity_type not in {"performance", "zen"}:
+        raise HTTPException(status_code=400, detail="活动类型只能是 performance（演出）或 zen（禅修体验）")
+
+def normalize_activity_schedule(value: str | None):
+    if not value:
+        return None
+    times = []
+    for item in re.split(r"[,，、\s]+", value):
+        text = item.strip()
+        if not text:
+            continue
+        if not re.match(r"^\d{1,2}:\d{2}$", text):
+            raise HTTPException(status_code=400, detail="演出时间格式请使用 HH:MM，多个时间用逗号分隔")
+        hour, minute = text.split(":")
+        times.append(f"{int(hour):02d}:{minute}")
+    return json.dumps(sorted(set(times)), ensure_ascii=False)
 
 @router.post("/knowledge")
 async def create_knowledge(item: KnowledgeItem, db: Session = Depends(get_db)):
@@ -156,6 +216,138 @@ async def delete_digital_human_config(config_id: int, db: Session = Depends(get_
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
+
+@router.get("/tickets")
+async def get_ticket_products(db: Session = Depends(get_db), ticket_type: str = None, include_inactive: bool = True):
+    try:
+        query = db.query(TicketProduct)
+        if ticket_type:
+            query = query.filter(TicketProduct.ticket_type == ticket_type)
+        if not include_inactive:
+            query = query.filter(TicketProduct.is_active == True)
+        items = query.order_by(TicketProduct.sort_order.asc(), TicketProduct.id.asc()).all()
+        return {"items": items}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询票务信息失败: {str(e)}")
+
+@router.post("/tickets")
+async def create_ticket_product(item: TicketProductItem, db: Session = Depends(get_db)):
+    try:
+        ticket = TicketProduct(**item.model_dump())
+        db.add(ticket)
+        db.commit()
+        db.refresh(ticket)
+        return {"message": "票务信息已创建", "item": ticket}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"创建票务信息失败: {str(e)}")
+
+@router.put("/tickets/{ticket_id}")
+async def update_ticket_product(ticket_id: int, item: TicketProductUpdate, db: Session = Depends(get_db)):
+    try:
+        ticket = db.query(TicketProduct).filter(TicketProduct.id == ticket_id).first()
+        if not ticket:
+            raise HTTPException(status_code=404, detail="票务信息不存在")
+
+        updates = item.model_dump(exclude_unset=True)
+        for key, value in updates.items():
+            setattr(ticket, key, value)
+
+        db.commit()
+        db.refresh(ticket)
+        return {"message": "票务信息已更新", "item": ticket}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"更新票务信息失败: {str(e)}")
+
+@router.delete("/tickets/{ticket_id}")
+async def delete_ticket_product(ticket_id: int, db: Session = Depends(get_db)):
+    try:
+        ticket = db.query(TicketProduct).filter(TicketProduct.id == ticket_id).first()
+        if not ticket:
+            raise HTTPException(status_code=404, detail="票务信息不存在")
+        db.delete(ticket)
+        db.commit()
+        return {"message": "票务信息已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"删除票务信息失败: {str(e)}")
+
+@router.get("/activities")
+async def get_scenic_activities(db: Session = Depends(get_db), activity_type: str = None, include_inactive: bool = True):
+    try:
+        query = db.query(ScenicActivity)
+        if activity_type:
+            query = query.filter(ScenicActivity.activity_type == activity_type)
+        if not include_inactive:
+            query = query.filter(ScenicActivity.is_active == True)
+        items = query.order_by(ScenicActivity.id.asc()).all()
+        return {"items": items}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询活动信息失败: {str(e)}")
+
+@router.post("/activities")
+async def create_scenic_activity(item: ScenicActivityItem, db: Session = Depends(get_db)):
+    try:
+        validate_activity_type(item.activity_type)
+        payload = item.model_dump()
+        payload["schedule_times"] = normalize_activity_schedule(item.schedule_times)
+        activity = ScenicActivity(**payload)
+        db.add(activity)
+        db.commit()
+        db.refresh(activity)
+        return {"message": "活动信息已创建", "item": activity}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"创建活动信息失败: {str(e)}")
+
+@router.put("/activities/{activity_id}")
+async def update_scenic_activity(activity_id: int, item: ScenicActivityUpdate, db: Session = Depends(get_db)):
+    try:
+        activity = db.query(ScenicActivity).filter(ScenicActivity.id == activity_id).first()
+        if not activity:
+            raise HTTPException(status_code=404, detail="活动信息不存在")
+
+        updates = item.model_dump(exclude_unset=True)
+        if "activity_type" in updates:
+            validate_activity_type(updates["activity_type"])
+        if "schedule_times" in updates:
+            updates["schedule_times"] = normalize_activity_schedule(updates["schedule_times"])
+
+        for key, value in updates.items():
+            setattr(activity, key, value)
+
+        db.commit()
+        db.refresh(activity)
+        return {"message": "活动信息已更新", "item": activity}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"更新活动信息失败: {str(e)}")
+
+@router.delete("/activities/{activity_id}")
+async def delete_scenic_activity(activity_id: int, db: Session = Depends(get_db)):
+    try:
+        activity = db.query(ScenicActivity).filter(ScenicActivity.id == activity_id).first()
+        if not activity:
+            raise HTTPException(status_code=404, detail="活动信息不存在")
+        db.delete(activity)
+        db.commit()
+        return {"message": "活动信息已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"删除活动信息失败: {str(e)}")
 
 @router.get("/report")
 async def get_visitor_report(start_date: str, end_date: str, db: Session = Depends(get_db)):

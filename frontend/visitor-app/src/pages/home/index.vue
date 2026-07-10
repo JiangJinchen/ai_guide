@@ -116,15 +116,23 @@
     <view class="section today-section">
       <view class="section-head">
         <text class="section-title">今日灵山</text>
-        <text class="section-more">实时提醒</text>
+        <text class="section-more" @click="openActivityList('performance')">未开始演出</text>
       </view>
       <view class="notice-list">
-        <view class="notice-row" v-for="notice in notices" :key="notice.title">
-          <text class="notice-time">{{ notice.time }}</text>
+        <view
+          class="notice-row"
+          v-for="notice in notices"
+          :key="notice.id + '-' + notice.event_time"
+          @click="openActivityDetail(notice)"
+        >
+          <text class="notice-time">{{ notice.display_time || notice.event_time }}</text>
           <view class="notice-body">
-            <text class="notice-title">{{ notice.title }}</text>
-            <text class="notice-desc">{{ notice.desc }}</text>
+            <text class="notice-title">{{ notice.name }}</text>
+            <text class="notice-desc">{{ formatActivityDesc(notice) }}</text>
           </view>
+        </view>
+        <view class="notice-empty" v-if="!notices.length">
+          <text>今日暂无未开始演出，请以景区当日公告为准。</text>
         </view>
       </view>
     </view>
@@ -174,6 +182,7 @@ export default {
           summary: '安排更顺路的游览体验。',
           items: [
             { name: '附近景点', url: '/pages/nearby-spots/index', desc: '基于定位推荐' },
+            { name: '票务助手', url: '/pages/ticket-assistant/index', desc: '门票与观光车信息' },
             { name: '个性推荐', url: '/pages/recommendation/index', desc: '按偏好推荐景点' },
             { name: '服务评价', url: '/pages/feedback/index', desc: '提交体验反馈' }
           ]
@@ -181,34 +190,28 @@ export default {
         {
           key: 'education',
           name: '活动服务',
-          subtitle: '今日演出、禅修与祈福活动',
+          subtitle: '演出时间与禅修体验',
           icon: '禅',
-          summary: '聚合今日演出、禅修体验与祈福活动提醒。',
+          summary: '聚合演出时间与禅修体验提醒。',
           items: [
-            { name: '今日灵山', anchor: 'today', desc: '演出与活动提醒' },
-            { name: '禅修体验', anchor: 'today', desc: '预约体验预告' },
-            { name: '祈福点灯', anchor: 'today', desc: '活动信息' }
+            { name: '演出时间', url: '/pages/activity-service/index?type=performance', desc: '查看未开始场次' },
+            { name: '禅修体验', url: '/pages/activity-service/index?type=zen', desc: '体验介绍与现场指引' }
           ]
         },
         {
           key: 'alumni',
           name: '游客服务',
-          subtitle: '管理个人信息与预约',
+          subtitle: '管理个人信息',
           icon: '客',
           summary: '管理个人信息入口。',
           items: [
             { name: '个人中心', url: '/pages/profile/index', tab: true, desc: '偏好和足迹' },
-            { name: '我的预约', url: '/pages/profile/index', tab: true, desc: '查看预约记录' },
             { name: '联系客服', url: '/pages/profile/index', tab: true, desc: '人工客服入口' }
           ]
         }
       ],
-      notices: [
-        { time: '09:30', title: '梵宫吉祥颂', desc: '上午场即将开始，建议提前二十分钟入场。' },
-        { time: '10:00', title: '九龙灌浴', desc: '今日正常演出，雨天以现场通知为准。' },
-        { time: '14:00', title: '禅修体验', desc: '体验名额有限，可在服务台咨询预约。' },
-        { time: '全天', title: '祈福点灯', desc: '灵山大佛广场周边开放祈福服务。' }
-      ]
+      notices: [],
+      todayRefreshTimer: null
     }
   },
   computed: {
@@ -241,6 +244,17 @@ export default {
   },
   onLoad() {
     this.loadSpots()
+    this.loadUpcomingActivities()
+  },
+  onShow() {
+    this.loadUpcomingActivities()
+    this.startTodayRefresh()
+  },
+  onHide() {
+    this.stopTodayRefresh()
+  },
+  onUnload() {
+    this.stopTodayRefresh()
   },
   methods: {
     async loadSpots() {
@@ -256,6 +270,31 @@ export default {
       } catch (e) {
         this.spots = fallbackSpots
       }
+    },
+    async loadUpcomingActivities() {
+      try {
+        const data = await get('/activities/upcoming', { limit: 4 })
+        this.notices = data.items || []
+      } catch (e) {
+        this.notices = []
+      }
+    },
+    startTodayRefresh() {
+      this.stopTodayRefresh()
+      this.todayRefreshTimer = setInterval(() => {
+        this.loadUpcomingActivities()
+      }, 5 * 60 * 1000)
+    },
+    stopTodayRefresh() {
+      if (this.todayRefreshTimer) {
+        clearInterval(this.todayRefreshTimer)
+        this.todayRefreshTimer = null
+      }
+    },
+    formatActivityDesc(activity) {
+      const place = activity.location ? `地点：${activity.location}` : '地点以现场公告为准'
+      const note = activity.schedule_note || '以景区当日公告为准'
+      return `${place} · ${note}`
     },
     handleSearch() {
       if (this.keyword.trim()) {
@@ -296,6 +335,14 @@ export default {
     },
     goToGuide(id) {
       uni.navigateTo({ url: `/pages/guide/index?spot_id=${id}` })
+    },
+    openActivityList(type = 'performance') {
+      uni.navigateTo({ url: `/pages/activity-service/index?type=${type}` })
+    },
+    openActivityDetail(activity) {
+      uni.navigateTo({
+        url: `/pages/activity-service/index?id=${activity.id}&type=${activity.activity_type || 'performance'}&time=${activity.event_time || ''}`
+      })
     }
   }
 }
@@ -811,5 +858,12 @@ export default {
   color: #7c6a57;
   font-size: 23rpx;
   line-height: 1.45;
+}
+
+.notice-empty {
+  padding: 34rpx 22rpx;
+  color: #9b8266;
+  font-size: 24rpx;
+  text-align: center;
 }
 </style>

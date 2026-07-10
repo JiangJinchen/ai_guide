@@ -6,6 +6,8 @@ import ReportPage from './pages/report/index.jsx'
 import DashboardPage from './pages/dashboard/index.jsx'
 import PermissionPage from './pages/permission/index.jsx'
 import LogsPage from './pages/logs/index.jsx'
+import TicketsPage from './pages/tickets/index.jsx'
+import ActivitiesPage from './pages/activities/index.jsx'
 
 function App() {
   return (
@@ -23,6 +25,8 @@ function App() {
             <ul>
               <li><Link to="/">数据大屏概览</Link></li>
               <li><Link to="/knowledge">知识库管理</Link></li>
+              <li><Link to="/tickets">票务信息管理</Link></li>
+              <li><Link to="/activities">活动信息管理</Link></li>
               <li><Link to="/digital-human">数字人形象管理</Link></li>
               <li><Link to="/report">游客感受度报告</Link></li>
               <li><Link to="/permission">权限管理</Link></li>
@@ -33,6 +37,8 @@ function App() {
             <Routes>
               <Route path="/" element={<DashboardPage />} />
               <Route path="/knowledge" element={<KnowledgePage />} />
+              <Route path="/tickets" element={<TicketsPage />} />
+              <Route path="/activities" element={<ActivitiesPage />} />
               <Route path="/digital-human" element={<DigitalHumanPage />} />
               <Route path="/report" element={<ReportPage />} />
               <Route path="/permission" element={<PermissionPage />} />

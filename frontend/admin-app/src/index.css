@@ -196,3 +196,13 @@ th {
   width: auto;
   margin-bottom: 0;
 }
+
+.ticket-form {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.table-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
