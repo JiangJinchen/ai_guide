@@ -74,6 +74,7 @@ AMAP_WEB_KEY = os.getenv("AMAP_WEB_KEY", "")
 AMAP_DISTANCE_URL = "https://restapi.amap.com/v3/distance"
 AMAP_WALKING_URL = "https://restapi.amap.com/v3/direction/walking"
 AMAP_GEOCODE_URL = "https://restapi.amap.com/v3/geocode/geo"
+AMAP_PLACE_AROUND_URL = "https://restapi.amap.com/v3/place/around"
 
 EMOTION_EXPRESSION_MAP = {
     "negative": "Sad",
@@ -145,6 +146,234 @@ def get_spot_detail(spot_id: int, db: Session = Depends(get_db)):
     if not spot:
         raise HTTPException(status_code=404, detail="景点不存在")
     return spot
+
+NEARBY_SERVICE_POINTS = [
+    {"id": "food-1", "name": "香月花街素食馆", "type": "food", "desc": "景区内特色素食餐厅", "latitude": 31.42822, "longitude": 120.10282},
+    {"id": "food-2", "name": "梵宫简餐点", "type": "food", "desc": "梵宫附近便捷餐饮", "latitude": 31.43066, "longitude": 120.1009},
+    {"id": "food-3", "name": "无尽意斋", "type": "food", "desc": "精致素斋体验", "latitude": 31.43156, "longitude": 120.10066},
+    {"id": "food-4", "name": "灵香斋农家菜馆", "type": "food", "desc": "传统农家菜馆", "latitude": 31.42126, "longitude": 120.106986},
+    {"id": "food-5", "name": "港湾渔家土菜馆", "type": "food", "desc": "传统土菜馆", "latitude": 31.421669, "longitude": 120.106873},
+    {"id": "food-6", "name": "乡来客私房菜馆（马山灵山店）", "type": "food", "desc": "私房菜馆", "latitude": 31.422071, "longitude": 120.10646},
+    {"id": "food-7", "name": "船菜人家（灵山店）", "type": "food", "desc": "", "latitude": 31.422563, "longitude": 120.106218},
+    {"id": "food-8", "name": "望佛楼湖鲜馆（灵山大佛店）", "type": "food", "desc": "", "latitude": 31.423185, "longitude": 120.105885},
+    {"id": "food-9", "name": "江南船菜", "type": "food", "desc": "", "latitude": 31.423455, "longitude": 120.105709},
+    {"id": "food-10", "name": "丽景轩船菜渔蟹馆·妈妈家的味道（拈花湾景区灵山大佛店）", "type": "food", "desc": "", "latitude": 31.423498, "longitude": 120.105831},
+    {"id": "food-11", "name": "灵成面馆（20年老店）", "type": "food", "desc": "", "latitude": 31.423613, "longitude": 120.105745},
+    {"id": "food-12", "name": "渔家私房菜", "type": "food", "desc": "", "latitude": 31.421151, "longitude": 120.102295},
+    {"id": "food-13", "name": "祈福楼", "type": "food", "desc": "", "latitude": 31.424358, "longitude": 120.105666},
+    {"id": "food-14", "name": "渔味坊私房菜（拈花湾景区·灵山大佛店）", "type": "food", "desc": "", "latitude": 31.424784, "longitude": 120.10562},
+    {"id": "food-15", "name": "灵福缘私房菜（灵山店）", "type": "food", "desc": "", "latitude": 31.425173, "longitude": 120.105673},
+    {"id": "food-16", "name": "灵德福船菜·农家乐熟醉蟹（灵山大佛景区店）", "type": "food", "desc": "", "latitude": 31.425476, "longitude": 120.105711},
+    {"id": "food-17", "name": "灵山蔬食馆", "type": "food", "desc": "", "latitude": 31.426824, "longitude": 120.10007},
+    {"id": "food-18", "name": "如愿食令", "type": "food", "desc": "", "latitude": 31.429077, "longitude": 120.097675},
+    {"id": "food-19", "name": "吾家餐馆", "type": "food", "desc": "", "latitude": 31.422477, "longitude": 120.097251},
+    {"id": "food-20", "name": "无锡且停居", "type": "food", "desc": "", "latitude": 31.417919, "longitude": 120.08016},
+    {"id": "food-21", "name": "波罗蜜多酒店·如饴轩·无锡本帮菜·淮扬菜", "type": "food", "desc": "", "latitude": 31.423367, "longitude": 120.081699},
+    {"id": "food-22", "name": "捌渡精酿小馆", "type": "food", "desc": "", "latitude": 31.415461, "longitude": 120.072785},
+    {"id": "food-23", "name": "魔都三兄弟", "type": "food", "desc": "", "latitude": 31.416182, "longitude": 120.072927},
+    {"id": "food-24", "name": "朴大叔拌饭", "type": "food", "desc": "", "latitude": 31.416288, "longitude": 120.073127},
+    {"id": "food-25", "name": "品渔味湖畔馆", "type": "food", "desc": "", "latitude": 31.41675, "longitude": 120.073015},
+    {"id": "food-26", "name": "遂意居·神仙鸡", "type": "food", "desc": "", "latitude": 31.417047, "longitude": 120.073349},
+    {"id": "food-27", "name": "椰不二", "type": "food", "desc": "", "latitude": 31.417674, "longitude": 120.073971},
+    {"id": "food-28", "name": "拈花锡食", "type": "food", "desc": "", "latitude": 31.417774, "longitude": 120.074485},
+    {"id": "food-29", "name": "茶花源记", "type": "food", "desc": "", "latitude": 31.417916, "longitude": 120.074385},
+    {"id": "food-30", "name": "一念之间（拈花湾景区店）", "type": "food", "desc": "", "latitude": 31.418016, "longitude": 120.074747},
+    {"id": "food-31", "name": "肯德基", "type": "food", "desc": "", "latitude": 31.418201, "longitude": 120.073799},
+    {"id": "food-32", "name": "星巴克", "type": "food", "desc": "", "latitude": 31.417621, "longitude": 120.074212},
+    {"id": "food-33", "name": "寸一·精致料理", "type": "food", "desc": "", "latitude": 31.418443, "longitude": 120.074246},
+    {"id": "food-34", "name": "粤阿东·深井烧鹅（拈花湾店）", "type": "food", "desc": "", "latitude": 31.418514, "longitude": 120.074933},
+    {"id": "food-35", "name": "CoCo都可", "type": "food", "desc": "", "latitude": 31.419862, "longitude": 120.075699},
+    {"id": "food-36", "name": "舒影时光（拈花湾店）", "type": "food", "desc": "", "latitude": 31.420148, "longitude": 120.075427},
+    {"id": "food-37", "name": "苗小坛番茄酸汤鱼（无锡拈花湾店）", "type": "food", "desc": "", "latitude": 31.420227, "longitude": 120.075827},
+    {"id": "food-38", "name": "渝八两鸡公煲", "type": "food", "desc": "", "latitude": 31.420375, "longitude": 120.075672},
+    {"id": "food-39", "name": "谷本鲜粥", "type": "food", "desc": "", "latitude": 31.421057, "longitude": 120.076044},
+
+    {"id": "hotel-1", "name": "灵山精舍", "type": "hotel", "desc": "禅意主题酒店，景区内", "latitude": 31.42758, "longitude": 120.10256},
+    {"id": "hotel-2", "name": "拈花湾客栈", "type": "hotel", "desc": "特色客栈，步行可达", "latitude": 31.42586, "longitude": 120.10524},
+    {"id": "hotel-3", "name": "无锡希尔顿逸林", "type": "hotel", "desc": "星级酒店，距景区约2公里", "latitude": 31.41024, "longitude": 120.09876},
+
+    {"id": "parking-1", "name": "东入口停车场", "type": "parking", "desc": "景区主入口停车场", "latitude": 31.42858, "longitude": 120.09422},
+    {"id": "parking-2", "name": "南区停车场", "type": "parking", "desc": "大型露天停车场", "latitude": 31.42696, "longitude": 120.0962},
+
+    {"id": "toilet-1", "name": "入口卫生间", "type": "toilet", "desc": "景区入口处卫生间", "latitude": 31.420612, "longitude": 120.103676},
+    {"id": "toilet-2", "name": "大佛广场卫生间", "type": "toilet", "desc": "大佛广场附近卫生间", "latitude": 31.43292, "longitude": 120.09928},
+    {"id": "toilet-3", "name": "售票处卫生间", "type": "toilet", "desc": "售票处卫生间", "latitude": 31.420139, "longitude": 120.103037},
+    {"id": "toilet-4", "name": "景区内卫生间", "type": "toilet", "desc": "景区内卫生间", "latitude": 31.422128, "longitude": 120.101132},
+    {"id": "toilet-5", "name": "南2门卫生间", "type": "toilet", "desc": "南2门卫生间", "latitude": 31.421872, "longitude": 120.103364},
+    {"id": "toilet-6", "name": "灵山胜境卫生间", "type": "toilet", "desc": "灵山胜境卫生间", "latitude": 31.426189, "longitude": 120.10146},
+    {"id": "toilet-7", "name": "曼飞龙塔卫生间", "type": "toilet", "desc": "曼飞龙塔卫生间", "latitude": 31.42659, "longitude": 120.104364},
+    {"id": "toilet-8", "name": "灵山梵宫卫生间", "type": "toilet", "desc": "灵山梵宫卫生间", "latitude": 31.428031, "longitude": 120.102089},
+    {"id": "toilet-9", "name": "杏坛广场卫生间", "type": "toilet", "desc": "杏坛广场卫生间", "latitude": 31.428289, "longitude": 120.09656},
+    {"id": "toilet-10", "name": "佛手广场卫生间", "type": "toilet", "desc": "佛手广场卫生间", "latitude": 31.426747, "longitude": 120.097624},
+    {"id": "toilet-11", "name": "九龙灌浴卫生间", "type": "toilet", "desc": "九龙灌浴卫生间", "latitude": 31.424188, "longitude": 120.098569},
+
+    {"id": "center-1", "name": "游客服务中心", "type": "center", "desc": "景区综合服务中心", "latitude": 31.43039, "longitude": 120.09658},
+    {"id": "center-2", "name": "售票处", "type": "center", "desc": "景区售票处", "latitude": 31.420119, "longitude": 120.102935},
+    {"id": "center-3", "name": "观光车售票处", "type": "center", "desc":"观光车售票处", "latitude": 31.420176, "longitude": 120.103123},
+    {"id": "center-4", "name": "南门", "type": "center", "desc":"南门入口", "latitude": 31.420502, "longitude": 120.103079},
+    {"id": "center-5", "name": "灵山景区红十字救护站", "type": "center", "desc":"灵山景区红十字救护站", "latitude": 31.420057, "longitude": 120.103146},
+    {"id": "center-6", "name": "观光车候车亭（大照壁起始站）", "type": "center", "desc":"观光车候车亭（大照壁起始站）", "latitude": 31.421141, "longitude": 120.102718},
+    {"id": "center-7", "name": "公用电话", "type": "center", "desc":"公用电话", "latitude": 31.421839, "longitude": 120.101912},
+    {"id": "center-8", "name": "公用电话", "type": "center", "desc":"公用电话", "latitude": 31.42325, "longitude": 120.102177},
+    {"id": "center-9", "name": "观光车候车亭（五印坛城站）", "type": "center", "desc":"观光车候车亭（五印坛城站）", "latitude": 31.423603, "longitude": 120.103128},
+    {"id": "center-10", "name": "公用电话", "type": "center", "desc":"公用电话", "latitude": 31.423952, "longitude": 120.101031},
+    {"id": "center-11", "name": "观光车候车亭（曼飞龙塔站）", "type": "center", "desc":"观光车候车亭（曼飞龙塔站）", "latitude": 31.42637, "longitude": 120.104074},
+    {"id": "center-12", "name": "观光车候车亭（灵山梵宫站）", "type": "center", "desc":"观光车候车亭（灵山梵宫站）", "latitude": 31.427704, "longitude": 120.102195},
+    {"id": "center-13", "name": "观光车候车亭（蔬菜馆站）", "type": "center", "desc":"观光车候车亭（蔬菜馆站）", "latitude": 31.426929, "longitude": 120.099492},
+    {"id": "center-14", "name": "观光车候车亭（佛手广场站）", "type": "center", "desc":"观光车候车亭（佛手广场站）", "latitude": 31.426494, "longitude": 120.09857},
+    {"id": "center-15", "name": "观光车候车亭（杏坛广场站）", "type": "center", "desc":"观光车候车亭（杏坛广场站）", "latitude": 31.428386, "longitude": 120.096755},
+    {"id": "center-16", "name": "观光车候车亭（九龙灌浴站）", "type": "center", "desc":"观光车候车亭（九龙灌浴站）", "latitude": 31.424188, "longitude": 120.098569},
+    {"id": "center-17", "name": "拈花湾景区接待中心", "type": "center", "desc":"抓花湾景区接待中心", "latitude": 31.419471, "longitude": 120.07873}
+]
+
+@router.get("/spots/{spot_id}/nearby")
+def get_spot_nearby(spot_id: int, db: Session = Depends(get_db), max_distance_km: float = 1.0):
+    spot = db.query(Spot).filter(Spot.id == spot_id).first()
+    if not spot:
+        raise HTTPException(status_code=404, detail="景点不存在")
+    
+    origin_lat = spot.latitude or SPOT_COORDS.get(spot.spot_name, {}).get("latitude")
+    origin_lon = spot.longitude or SPOT_COORDS.get(spot.spot_name, {}).get("longitude")
+    
+    if not origin_lat or not origin_lon:
+        return {
+            "spot_id": spot_id,
+            "spot_name": spot.spot_name,
+            "nearby_spots": [],
+            "food": [],
+            "hotel": [],
+            "services": []
+        }
+    
+    nearby_spots = []
+    all_spots = db.query(Spot).all()
+    for s in all_spots:
+        if s.id == spot_id:
+            continue
+        dest_lat = s.latitude or SPOT_COORDS.get(s.spot_name, {}).get("latitude")
+        dest_lon = s.longitude or SPOT_COORDS.get(s.spot_name, {}).get("longitude")
+        if not dest_lat or not dest_lon:
+            continue
+        distance = calc_distance_m(origin_lat, origin_lon, dest_lat, dest_lon)
+        if distance > max_distance_km * 1000:
+            continue
+        nearby_spots.append({
+            "id": s.id,
+            "name": s.spot_name,
+            "desc": s.description[:30] + "..." if len(s.description) > 30 else s.description,
+            "type": "spot",
+            "distance": distance,
+            "distance_text": f"{distance}米" if distance < 1000 else f"{round(distance / 1000, 1)}公里",
+            "latitude": dest_lat,
+            "longitude": dest_lon
+        })
+    
+    nearby_spots.sort(key=lambda x: x["distance"])
+    
+    food = []
+    hotel = []
+    services = []
+    
+    amap_food = fetch_amap_place_around(origin_lat, origin_lon, types=POI_TYPE_MAP["food"], radius=int(max_distance_km * 1000))
+    amap_hotel = fetch_amap_place_around(origin_lat, origin_lon, types=POI_TYPE_MAP["hotel"], radius=int(max_distance_km * 1000))
+    amap_parking = fetch_amap_place_around(origin_lat, origin_lon, types=POI_TYPE_MAP["parking"], radius=int(max_distance_km * 1000))
+    
+    if amap_food:
+        food = [{
+            "id": item["id"],
+            "name": item["name"],
+            "type": "food",
+            "desc": item["desc"][:20] + "..." if len(item["desc"]) > 20 else item["desc"],
+            "distance": item["distance"],
+            "distance_text": item["distance_text"],
+            "latitude": item["latitude"],
+            "longitude": item["longitude"]
+        } for item in amap_food[:3]]
+    else:
+        for service in NEARBY_SERVICE_POINTS:
+            if service["type"] != "food":
+                continue
+            distance = calc_distance_m(origin_lat, origin_lon, service["latitude"], service["longitude"])
+            if distance > max_distance_km * 1000:
+                continue
+            food.append({
+                **service,
+                "distance": distance,
+                "distance_text": f"{distance}米" if distance < 1000 else f"{round(distance / 1000, 1)}公里"
+            })
+        food.sort(key=lambda x: x["distance"])
+        food = food[:3]
+    
+    if amap_hotel:
+        hotel = [{
+            "id": item["id"],
+            "name": item["name"],
+            "type": "hotel",
+            "desc": item["desc"][:20] + "..." if len(item["desc"]) > 20 else item["desc"],
+            "distance": item["distance"],
+            "distance_text": item["distance_text"],
+            "latitude": item["latitude"],
+            "longitude": item["longitude"]
+        } for item in amap_hotel[:3]]
+    else:
+        for service in NEARBY_SERVICE_POINTS:
+            if service["type"] != "hotel":
+                continue
+            distance = calc_distance_m(origin_lat, origin_lon, service["latitude"], service["longitude"])
+            if distance > max_distance_km * 1000:
+                continue
+            hotel.append({
+                **service,
+                "distance": distance,
+                "distance_text": f"{distance}米" if distance < 1000 else f"{round(distance / 1000, 1)}公里"
+            })
+        hotel.sort(key=lambda x: x["distance"])
+        hotel = hotel[:3]
+    
+    amap_services = []
+    if amap_parking:
+        amap_services.extend([{**item, "type": "parking"} for item in amap_parking[:2]])
+    
+    for service_type in ["toilet", "center"]:
+        amap_result = fetch_amap_place_around(origin_lat, origin_lon, types=POI_TYPE_MAP.get(service_type), radius=int(max_distance_km * 1000), page_size=5)
+        if amap_result:
+            amap_services.extend([{**item, "type": service_type} for item in amap_result[:1]])
+    
+    if amap_services:
+        services = [{
+            "id": item["id"],
+            "name": item["name"],
+            "type": item["type"],
+            "desc": item["desc"][:20] + "..." if len(item["desc"]) > 20 else item["desc"],
+            "distance": item["distance"],
+            "distance_text": item["distance_text"],
+            "latitude": item["latitude"],
+            "longitude": item["longitude"]
+        } for item in amap_services[:3]]
+    else:
+        for service in NEARBY_SERVICE_POINTS:
+            if service["type"] in ["food", "hotel"]:
+                continue
+            distance = calc_distance_m(origin_lat, origin_lon, service["latitude"], service["longitude"])
+            if distance > max_distance_km * 1000:
+                continue
+            services.append({
+                **service,
+                "distance": distance,
+                "distance_text": f"{distance}米" if distance < 1000 else f"{round(distance / 1000, 1)}公里"
+            })
+        services.sort(key=lambda x: x["distance"])
+        services = services[:3]
+    
+    return {
+        "spot_id": spot_id,
+        "spot_name": spot.spot_name,
+        "origin_location": {"latitude": origin_lat, "longitude": origin_lon},
+        "nearby_spots": nearby_spots[:3],
+        "food": food,
+        "hotel": hotel,
+        "services": services
+    }
 
 # ==============================
 # 3. 景点讲解
@@ -1502,6 +1731,75 @@ def fetch_amap_geocode(address):
         }
     except Exception as e:
         logger.error(f"[AMAP] 地理编码调用异常 - {str(e)}")
+        return None
+
+POI_TYPE_MAP = {
+    "food": ["050000", "050100", "050200", "050300", "050400", "050500", "050600", "050700"],
+    "hotel": ["090000", "090100", "090200", "090300", "090400"],
+    "parking": ["150200"],
+    "toilet": ["150600"],
+    "center": ["150100"]
+}
+
+@amap_rate_limited
+def fetch_amap_place_around(latitude, longitude, keyword=None, types=None, radius=1000, page_size=20):
+    if not AMAP_WEB_KEY:
+        logger.info("[AMAP] 高德API密钥未配置，跳过POI搜索")
+        return None
+
+    params = {
+        "key": AMAP_WEB_KEY,
+        "location": f"{longitude},{latitude}",
+        "radius": radius,
+        "offset": page_size,
+        "page": 1,
+        "extensions": "all"
+    }
+
+    if keyword:
+        params["keywords"] = keyword
+    if types:
+        params["types"] = "|".join(types)
+
+    try:
+        with httpx.Client(timeout=10, verify=False) as client:
+            response = client.get(AMAP_PLACE_AROUND_URL, params=params)
+            response.raise_for_status()
+            payload = response.json()
+
+        status = payload.get("status")
+        if status != "1":
+            err_code = payload.get("infocode")
+            err_msg = payload.get("info")
+            logger.warning(f"[AMAP] POI搜索失败 - status={status}, infocode={err_code}, info={err_msg}")
+            return None
+
+        pois = payload.get("pois") or []
+        logger.info(f"[AMAP] POI搜索成功 - 位置=({latitude}, {longitude}), 数量={len(pois)}")
+
+        result = []
+        for poi in pois:
+            location = poi.get("location", "")
+            if not location:
+                continue
+            lng, lat = location.split(",")
+            result.append({
+                "id": poi.get("id", ""),
+                "name": poi.get("name", ""),
+                "type": poi.get("type", ""),
+                "typecode": poi.get("typecode", ""),
+                "desc": poi.get("address", "") or poi.get("tel", ""),
+                "latitude": float(lat),
+                "longitude": float(lng),
+                "distance": int(poi.get("distance", 0)),
+                "distance_text": f"{poi.get('distance', 0)}米",
+                "tel": poi.get("tel", ""),
+                "address": poi.get("address", "")
+            })
+
+        return result
+    except Exception as e:
+        logger.error(f"[AMAP] POI搜索调用异常 - {str(e)}")
         return None
 
 def build_navigation_route(request: NavigationRouteRequest):

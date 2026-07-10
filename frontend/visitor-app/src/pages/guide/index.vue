@@ -140,6 +140,7 @@ export default {
       spotDetail: null,
       guideContent: null,
       spots: fallbackSpots,
+      nearbyData: null,
       isLoading: false,
       startTime: 0,
       behaviorId: null
@@ -198,20 +199,41 @@ export default {
       return []
     },
     nearbyItems() {
-      const otherSpots = this.spots
-        .filter(item => item.id !== this.spotDetail?.id)
-        .slice(0, 2)
-        .map(item => ({
+      if (!this.nearbyData) {
+        return []
+      }
+      const items = []
+      this.nearbyData.nearby_spots?.forEach(spot => {
+        items.push({
           type: 'spot',
-          id: item.id,
-          name: item.spot_name || item.name,
-          desc: '附近景点，可继续查看详情'
-        }))
-      return [
-        ...otherSpots,
-        { type: 'food', name: '香月花街素食', desc: '步行可达，适合午间休憩' },
-        { type: 'hotel', name: '景区周边旅宿', desc: '可跳转导航，后续接入预订' }
-      ]
+          id: spot.id,
+          name: spot.name,
+          desc: spot.distance_text + ' · ' + spot.desc,
+          latitude: spot.latitude,
+          longitude: spot.longitude
+        })
+      })
+      this.nearbyData.food?.forEach(food => {
+        items.push({
+          type: 'food',
+          id: food.id,
+          name: food.name,
+          desc: food.distance_text + ' · ' + food.desc,
+          latitude: food.latitude,
+          longitude: food.longitude
+        })
+      })
+      this.nearbyData.hotel?.forEach(hotel => {
+        items.push({
+          type: 'hotel',
+          id: hotel.id,
+          name: hotel.name,
+          desc: hotel.distance_text + ' · ' + hotel.desc,
+          latitude: hotel.latitude,
+          longitude: hotel.longitude
+        })
+      })
+      return items.slice(0, 5)
     },
     reviews() {
       return [
@@ -274,15 +296,18 @@ export default {
     async loadSpot(id) {
       this.isLoading = true
       this.spotId = id
+      this.nearbyData = null
       if (!this.spots.length) await this.loadSpotsList()
 
       try {
-        const [spot, guide] = await Promise.all([
+        const [spot, guide, nearby] = await Promise.all([
           get(`/spots/${id}`),
-          get(`/guide/${id}`)
+          get(`/guide/${id}`),
+          get(`/spots/${id}/nearby`)
         ])
         this.spotDetail = spot
         this.guideContent = guide
+        this.nearbyData = nearby
       } catch (e) {
         const fallback = fallbackSpots.find(item => item.id === id) || fallbackSpots[0]
         this.spotDetail = fallback
@@ -316,7 +341,18 @@ export default {
         this.loadSpot(item.id)
         uni.pageScrollTo({ scrollTop: 0, duration: 200 })
       } else {
-        uni.showToast({ title: '后续接入导航', icon: 'none' })
+        const lat = Number(item.latitude)
+        const lon = Number(item.longitude)
+        if (lat && lon) {
+          uni.openLocation({
+            latitude: lat,
+            longitude: lon,
+            name: item.name,
+            address: item.desc || '灵山胜境周边'
+          })
+        } else {
+          uni.showToast({ title: '位置信息暂不可用', icon: 'none' })
+        }
       }
     }
   }
