@@ -1,0 +1,8 @@
+{"query": "灵山大佛", "expected": [{"source_type": "spot", "source_id": 1}]}
+{"query": "梵宫", "expected": [{"source_type": "spot", "source_id": 2}]}
+{"query": "九龙灌浴", "expected": [{"source_type": "spot", "source_id": 3}]}
+{"query": "五印坛城", "expected": [{"source_type": "spot", "source_id": 4}]}
+{"query": "祥符禅寺", "expected": [{"source_type": "spot", "source_id": 5}]}
+{"query": "灵山胜境", "expected": [{"source_type": "knowledge"}]}
+{"query": "佛文化", "expected": [{"source_type": "knowledge"}]}
+{"query": "门票", "expected": [{"source_type": "knowledge"}]}

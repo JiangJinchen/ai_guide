@@ -11,6 +11,50 @@ class Knowledge(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
+
+class KnowledgeChunk(Base):
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_type",
+            "source_id",
+            "chunk_index",
+            name="uq_knowledge_chunks_source_position",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_type = Column(String(32), nullable=False, index=True)
+    source_id = Column(Integer, nullable=False, index=True)
+    chunk_index = Column(Integer, nullable=False)
+    title = Column(String(255), nullable=False)
+    content = Column(Text, nullable=False)
+    content_hash = Column(String(64), nullable=False, index=True)
+    metadata_json = Column(Text)
+    char_count = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class KnowledgeChunkEmbedding(Base):
+    __tablename__ = "knowledge_chunk_embeddings"
+    __table_args__ = (
+        UniqueConstraint(
+            "chunk_id",
+            "model_name",
+            name="uq_knowledge_chunk_embeddings_chunk_model",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    chunk_id = Column(Integer, nullable=False, index=True)
+    model_name = Column(String(255), nullable=False, index=True)
+    content_hash = Column(String(64), nullable=False, index=True)
+    dimensions = Column(Integer, nullable=False)
+    embedding_json = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
 class DigitalHumanConfig(Base):
     __tablename__ = "digital_human_config"
     id = Column(Integer, primary_key=True, index=True)
