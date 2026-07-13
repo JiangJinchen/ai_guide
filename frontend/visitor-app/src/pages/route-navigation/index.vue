@@ -479,6 +479,7 @@ export default {
         provider: 'amap',
         travel_mode: this.navigationPlan.travel_mode || 'walking',
         route_name: this.navigationPlan.route_name || '游览路线',
+        manual_order_locked: Boolean(this.navigationPlan.manual_order_locked),
         start: {
           id: start.id || start.spot_id || null,
           name: start.name || '当前位置',

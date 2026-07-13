@@ -1723,6 +1723,7 @@ class NavigationRouteRequest(BaseModel):
     route_name: str = "游览路线"
     start: NavigationPoint
     waypoints: List[NavigationPoint] = Field(default_factory=list)
+    manual_order_locked: bool = False
 
 def route_spot_name(spot):
     if isinstance(spot, dict):
@@ -2228,8 +2229,9 @@ def build_navigation_route(request: NavigationRouteRequest):
     travel_config = TRAVEL_MODE_CONFIG[travel_mode]
     start = nav_point_payload(request.start)
     waypoints = [nav_point_payload(point) for point in request.waypoints]
-    
-    waypoints = reorder_waypoints(start, waypoints)
+
+    if not request.manual_order_locked:
+        waypoints = reorder_waypoints(start, waypoints)
     
     for index, point in enumerate(waypoints):
         point["order"] = index + 1
@@ -2295,7 +2297,8 @@ def build_navigation_route(request: NavigationRouteRequest):
         "total_duration": math.ceil(total_duration / 60) if total_duration else 0,
         "polyline": all_polyline,
         "steps": all_steps,
-        "segments": segments
+        "segments": segments,
+        "manual_order_locked": request.manual_order_locked
     }
 
 def reorder_waypoints(start, waypoints):

@@ -53,28 +53,52 @@
     </view>
 
     <view class="segment-list" v-if="routeSpots.length">
+      <view class="segment-list-head">
+        <text class="segment-list-title">游览顺序</text>
+        <text class="order-status" :class="{ customized: manualOrderChanged }">
+          {{ manualOrderChanged ? '已按您的偏好调整' : '智能推荐顺序' }}
+        </text>
+      </view>
       <view
         class="segment-swipe"
-        v-for="(spot, index) in routeSpots"
+        :class="dragItemClass(index)"
+        v-for="(spot, index) in segmentSpots"
         :key="spot.id"
         @touchstart="handleSegmentTouchStart($event, index)"
         @touchmove="handleSegmentTouchMove"
         @touchend="handleSegmentTouchEnd($event, index)"
       >
         <view class="swipe-delete" @click.stop="removeSpot(index)">删除</view>
-        <view class="segment-card" :class="{ swiped: swipedIndex === index }" @longpress="startAdjustMode">
+        <view
+          class="segment-card"
+          :class="{ swiped: swipedIndex === index, dragging: dragCurrentIndex === index }"
+          :style="dragCardStyle(index, spot)"
+        >
           <text class="segment-index">{{ index + 1 }}</text>
           <view class="segment-main" @click="handleSegmentTap(spot)">
             <text class="segment-name">{{ spot.name }}</text>
             <text class="segment-meta">
-              {{ segmentInfo(index) }}｜停留 {{ spot.stay_minutes || 25 }} 分钟
+              {{ segmentInfo(index, spot) }}｜停留 {{ spot.stay_minutes || 25 }} 分钟
             </text>
             <text class="segment-desc">{{ spot.description || '景区推荐游览点' }}</text>
           </view>
           <view class="segment-actions">
             <text class="mini-btn" @click.stop="navigateToSpot(spot)">导航</text>
-            <text class="mini-btn" v-if="adjustMode && index > 0" @click.stop="moveSpot(index, -1)">上移</text>
-            <text class="mini-btn" v-if="adjustMode && index < routeSpots.length - 1" @click.stop="moveSpot(index, 1)">下移</text>
+          </view>
+          <view
+            class="drag-handle"
+            title="拖拽调整顺序"
+            aria-label="拖拽调整顺序"
+            @click.stop
+            @touchstart.stop="startSpotDrag($event, index)"
+            @touchmove.stop.prevent="moveSpotDrag"
+            @touchend.stop="endSpotDrag"
+            @touchcancel.stop="cancelSpotDrag"
+            @mousedown.stop.prevent="startSpotDrag($event, index)"
+          >
+            <view class="drag-line"></view>
+            <view class="drag-line"></view>
+            <view class="drag-line"></view>
           </view>
         </view>
       </view>
@@ -146,24 +170,39 @@ export default {
       shareMode: false,
       shareId: '',
       popupSpot: null,
-      adjustMode: false,
+      manualOrderChanged: false,
       savedOnce: false,
       swipedIndex: null,
       touchStartX: 0,
       touchStartY: 0,
       touchDeltaX: 0,
-      touchDeltaY: 0
+      touchDeltaY: 0,
+      dragPreviewSpots: null,
+      dragCurrentIndex: null,
+      dragStartY: 0,
+      dragLastY: 0,
+      dragGrabOffsetY: 0,
+      dragOffsetY: 0,
+      dragMoved: false,
+      dragMeasured: false,
+      dragSwapPending: false,
+      dragItemRects: [],
+      dragShiftOffsets: {},
+      dragShiftTimer: null
     }
   },
   computed: {
+    segmentSpots() {
+      return this.dragPreviewSpots || this.routeSpots
+    },
     totalDistance() {
-      if (this.routePlan?.total_distance && !this.adjustMode) {
+      if (this.routePlan?.total_distance) {
         return Number(this.routePlan.total_distance)
       }
       return this.calculateRouteDistance()
     },
     totalDuration() {
-      if (this.routePlan?.total_duration && !this.adjustMode) {
+      if (this.routePlan?.total_duration) {
         return Number(this.routePlan.total_duration)
       }
       const stay = this.routeSpots.reduce((sum, item) => sum + Number(item.stay_minutes || 25), 0)
@@ -244,6 +283,9 @@ export default {
       desc: routeName
     }
   },
+  beforeUnmount() {
+    this.cancelSpotDrag()
+  },
   methods: {
     userId() {
       return uni.getStorageSync('userId') || 'guest'
@@ -287,6 +329,7 @@ export default {
     applyRoutePlan(route, options = {}) {
       this.routePlan = JSON.parse(JSON.stringify(route || {}))
       this.routeSpots = (route.route || []).map(this.normalizeSpot).map(item => ({ ...item, style: this.pointStyle(item) }))
+      this.manualOrderChanged = Boolean(route.manual_order_changed ?? route.manualOrderChanged)
       if (options.persist !== false && !this.shareMode) {
         uni.setStorageSync('activeRoutePlan', this.routePlan)
       }
@@ -455,20 +498,19 @@ export default {
       if (value < 1000) return `${value}米`
       return `${(value / 1000).toFixed(1)}公里`
     },
-    segmentInfo(index) {
-      const segment = this.routePlan?.segments?.[index]
-      if (!segment) return this.routeSpots[index]?.location || '灵山胜境景区内'
+    segmentInfo(index, spot = this.routeSpots[index]) {
+      const originalIndex = this.dragPreviewSpots
+        ? this.routeSpots.findIndex(item => this.dragSpotKey(item) === this.dragSpotKey(spot))
+        : index
+      const segment = this.routePlan?.segments?.[originalIndex > -1 ? originalIndex : index]
+      if (!segment) return spot?.location || '灵山胜境景区内'
       const fromName = segment.from?.name || '当前位置'
       const distance = this.formatDistance(segment.distance_from_previous)
       const minutes = Number(segment.travel_minutes || segment.walk_minutes || 0)
       return `${fromName}到此约${distance}，行进${minutes}分钟`
     },
-    startAdjustMode() {
-      this.adjustMode = true
-      this.swipedIndex = null
-      uni.showToast({ title: '已进入排序调整', icon: 'none' })
-    },
     handleSegmentTouchStart(event, index) {
+      if (this.dragCurrentIndex !== null) return
       const touch = event.touches?.[0]
       if (!touch) return
       this.touchStartX = touch.clientX
@@ -480,12 +522,14 @@ export default {
       }
     },
     handleSegmentTouchMove(event) {
+      if (this.dragCurrentIndex !== null) return
       const touch = event.touches?.[0]
       if (!touch) return
       this.touchDeltaX = touch.clientX - this.touchStartX
       this.touchDeltaY = touch.clientY - this.touchStartY
     },
     handleSegmentTouchEnd(event, index) {
+      if (this.dragCurrentIndex !== null) return
       const isHorizontal = Math.abs(this.touchDeltaX) > Math.abs(this.touchDeltaY) + 12
       if (!isHorizontal) return
       if (this.touchDeltaX < -56) {
@@ -501,19 +545,217 @@ export default {
       }
       this.goToGuide(spot.id)
     },
-    moveSpot(index, offset) {
-      const target = index + offset
-      if (target < 0 || target >= this.routeSpots.length) return
-      const list = [...this.routeSpots]
-      const item = list.splice(index, 1)[0]
-      list.splice(target, 0, item)
-      this.routeSpots = list.map(spot => ({ ...spot, style: this.pointStyle(spot) }))
+    dragItemClass(index) {
+      if (this.dragCurrentIndex === null) return {}
+      return {
+        'drag-source': this.dragCurrentIndex === index,
+        'drag-placeholder': this.dragCurrentIndex === index && this.dragMoved
+      }
+    },
+    dragSpotKey(spot) {
+      return String(spot?.id ?? spot?.spot_id ?? spot?.name ?? '')
+    },
+    dragCardStyle(index, spot) {
+      if (this.dragCurrentIndex === index) {
+        return `transform:translateY(${this.dragOffsetY}px) scale(1.015);transition:none;`
+      }
+      const shift = Number(this.dragShiftOffsets[this.dragSpotKey(spot)] || 0)
+      return Math.abs(shift) > 0.5 ? `transform:translateY(${shift}px);` : ''
+    },
+    dragEventPoint(event) {
+      return event?.touches?.[0] || event?.changedTouches?.[0] || event
+    },
+    startSpotDrag(event, index) {
+      if (this.routeSpots.length < 2 || this.dragCurrentIndex !== null) return
+      const point = this.dragEventPoint(event)
+      if (!Number.isFinite(Number(point?.clientY))) return
+
+      this.swipedIndex = null
+      this.dragPreviewSpots = [...this.routeSpots]
+      this.dragCurrentIndex = index
+      this.dragStartY = Number(point.clientY)
+      this.dragLastY = Number(point.clientY)
+      this.dragGrabOffsetY = 0
+      this.dragOffsetY = 0
+      this.dragMoved = false
+      this.dragMeasured = false
+      this.dragSwapPending = false
+      this.dragItemRects = []
+      this.dragShiftOffsets = {}
+      this.measureDragItems()
+
+      // #ifdef H5
+      if (event?.type === 'mousedown' && typeof document !== 'undefined') {
+        document.addEventListener('mousemove', this.moveSpotDrag)
+        document.addEventListener('mouseup', this.endSpotDrag)
+      }
+      // #endif
+    },
+    measureDragItems() {
+      this.$nextTick(() => {
+        uni.createSelectorQuery()
+          .in(this)
+          .selectAll('.segment-swipe')
+          .boundingClientRect(rects => {
+            if (this.dragCurrentIndex === null) return
+            this.dragItemRects = Array.isArray(rects) ? rects : []
+            const currentRect = this.dragItemRects[this.dragCurrentIndex]
+            if (!currentRect) return
+            this.dragGrabOffsetY = this.dragStartY - Number(currentRect.top)
+            this.dragMeasured = true
+            this.updateDraggedCardOffset()
+            if (this.dragMoved) this.updateLiveDragOrder(this.dragLastY)
+          })
+          .exec()
+      })
+    },
+    moveSpotDrag(event) {
+      if (this.dragCurrentIndex === null) return
+      const point = this.dragEventPoint(event)
+      if (!Number.isFinite(Number(point?.clientY))) return
+      if (event?.cancelable) event.preventDefault()
+
+      this.dragLastY = Number(point.clientY)
+      this.dragMoved = this.dragMoved || Math.abs(this.dragLastY - this.dragStartY) > 4
+      this.updateDraggedCardOffset()
+      if (this.dragMoved) this.updateLiveDragOrder(this.dragLastY)
+    },
+    updateDraggedCardOffset() {
+      const currentRect = this.dragItemRects[this.dragCurrentIndex]
+      if (this.dragMeasured && currentRect) {
+        const desiredTop = this.dragLastY - this.dragGrabOffsetY
+        this.dragOffsetY = desiredTop - Number(currentRect.top)
+        return
+      }
+      this.dragOffsetY = this.dragLastY - this.dragStartY
+    },
+    updateLiveDragOrder(clientY) {
+      if (this.dragSwapPending || !this.dragItemRects.length || this.dragCurrentIndex === null) return
+      const centers = this.dragItemRects.map(rect => Number(rect.top) + Number(rect.height) / 2)
+      let closestIndex = this.dragCurrentIndex
+      let closestDistance = Infinity
+      centers.forEach((centerY, index) => {
+        const distance = Math.abs(clientY - centerY)
+        if (distance < closestDistance) {
+          closestDistance = distance
+          closestIndex = index
+        }
+      })
+      if (closestIndex === this.dragCurrentIndex) return
+
+      const direction = closestIndex > this.dragCurrentIndex ? 1 : -1
+      const adjacentIndex = this.dragCurrentIndex + direction
+      const boundary = (centers[this.dragCurrentIndex] + centers[adjacentIndex]) / 2 + direction * 6
+      if ((direction > 0 && clientY <= boundary) || (direction < 0 && clientY >= boundary)) return
+      this.swapDragPreview(closestIndex)
+    },
+    swapDragPreview(targetIndex) {
+      if (!this.dragPreviewSpots || this.dragCurrentIndex === null) return
+      const sourceIndex = this.dragCurrentIndex
+      const sourceRect = this.dragItemRects[sourceIndex]
+      const targetRect = this.dragItemRects[targetIndex]
+      if (!sourceRect || !targetRect) return
+
+      const previousTops = {}
+      this.dragPreviewSpots.forEach((spot, index) => {
+        previousTops[this.dragSpotKey(spot)] = Number(this.dragItemRects[index]?.top || 0)
+      })
+      const draggedVisualTop = Number(sourceRect.top) + this.dragOffsetY
+      const list = [...this.dragPreviewSpots]
+      const item = list.splice(sourceIndex, 1)[0]
+      list.splice(targetIndex, 0, item)
+
+      this.dragSwapPending = true
+      this.dragPreviewSpots = list
+      this.dragCurrentIndex = targetIndex
+      this.dragOffsetY = draggedVisualTop - Number(targetRect.top)
+
+      this.$nextTick(() => {
+        uni.createSelectorQuery()
+          .in(this)
+          .selectAll('.segment-swipe')
+          .boundingClientRect(rects => {
+            if (this.dragCurrentIndex === null || !this.dragPreviewSpots) return
+            const nextRects = Array.isArray(rects) ? rects : []
+            const shifts = {}
+            this.dragPreviewSpots.forEach((spot, index) => {
+              if (index === this.dragCurrentIndex) return
+              const previousTop = previousTops[this.dragSpotKey(spot)]
+              const nextTop = Number(nextRects[index]?.top || 0)
+              const shift = Number(previousTop) - nextTop
+              if (Number.isFinite(shift) && Math.abs(shift) > 0.5) {
+                shifts[this.dragSpotKey(spot)] = shift
+              }
+            })
+            this.dragItemRects = nextRects
+            this.dragShiftOffsets = shifts
+            this.dragSwapPending = false
+            this.updateDraggedCardOffset()
+            this.scheduleShiftReset()
+            this.updateLiveDragOrder(this.dragLastY)
+          })
+          .exec()
+      })
+    },
+    scheduleShiftReset() {
+      if (this.dragShiftTimer) clearTimeout(this.dragShiftTimer)
+      this.dragShiftTimer = setTimeout(() => {
+        this.dragShiftOffsets = {}
+        this.dragShiftTimer = null
+      }, 20)
+    },
+    endSpotDrag() {
+      if (this.dragCurrentIndex === null) return
+      const previewSpots = [...(this.dragPreviewSpots || this.routeSpots)]
+      const changed = this.dragMoved && previewSpots.some((spot, index) => {
+        return this.dragSpotKey(spot) !== this.dragSpotKey(this.routeSpots[index])
+      })
+
+      this.releaseDragMouseListeners()
+      this.resetDragState()
+      if (!changed) return
+
+      this.routeSpots = previewSpots.map(spot => ({ ...spot, style: this.pointStyle(spot) }))
+      this.markManualOrderChanged()
       this.syncRoutePlan()
+      uni.showToast({ title: '游览顺序已更新', icon: 'none' })
+    },
+    cancelSpotDrag() {
+      this.releaseDragMouseListeners()
+      this.resetDragState()
+    },
+    releaseDragMouseListeners() {
+      // #ifdef H5
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('mousemove', this.moveSpotDrag)
+        document.removeEventListener('mouseup', this.endSpotDrag)
+      }
+      // #endif
+    },
+    resetDragState() {
+      if (this.dragShiftTimer) clearTimeout(this.dragShiftTimer)
+      this.dragShiftTimer = null
+      this.dragPreviewSpots = null
+      this.dragCurrentIndex = null
+      this.dragStartY = 0
+      this.dragLastY = 0
+      this.dragGrabOffsetY = 0
+      this.dragOffsetY = 0
+      this.dragMoved = false
+      this.dragMeasured = false
+      this.dragSwapPending = false
+      this.dragItemRects = []
+      this.dragShiftOffsets = {}
+    },
+    markManualOrderChanged() {
+      this.manualOrderChanged = true
+      this.savedOnce = false
     },
     removeSpot(index) {
       this.routeSpots.splice(index, 1)
       this.routeSpots = this.routeSpots.map(spot => ({ ...spot, style: this.pointStyle(spot) }))
       this.swipedIndex = null
+      this.markManualOrderChanged()
       this.syncRoutePlan()
     },
     removeSpotById(id) {
@@ -523,6 +765,7 @@ export default {
     },
     addSpot(spot) {
       this.routeSpots.push({ ...spot, style: this.pointStyle(spot) })
+      this.markManualOrderChanged()
       this.syncRoutePlan()
       this.popupSpot = null
     },
@@ -543,7 +786,8 @@ export default {
         travel_duration: metrics.travel_duration,
         walk_duration: metrics.walk_duration,
         stay_duration: metrics.stay_duration,
-        segments: metrics.segments
+        segments: metrics.segments,
+        manual_order_changed: this.manualOrderChanged
       }
       if (!this.shareMode) {
         uni.setStorageSync('activeRoutePlan', this.routePlan)
@@ -588,12 +832,15 @@ export default {
       )
       const outsideScenicArea = distanceToScenic > SCENIC_AREA_RADIUS_M
       const startLocation = outsideScenicArea ? { ...SCENIC_ENTRY_LOCATION } : userLoc
-      const navigationSpots = outsideScenicArea
+      const shouldReoptimize = outsideScenicArea && !this.manualOrderChanged
+      const navigationSpots = shouldReoptimize
         ? this.optimizeSpotsFromStart(startLocation, this.routeSpots)
         : [...this.routeSpots]
       const navigationMetrics = this.buildRouteMetrics(navigationSpots, startLocation)
       const startNotice = outsideScenicArea
-        ? `您距离景区约${Math.round(distanceToScenic / 1000)}公里，已从灵山胜境游客中心重新规划游览顺序。`
+        ? shouldReoptimize
+          ? `您距离景区约${Math.round(distanceToScenic / 1000)}公里，已从灵山胜境游客中心重新规划游览顺序。`
+          : `您距离景区约${Math.round(distanceToScenic / 1000)}公里，将从灵山胜境游客中心开始，并按您调整的顺序导航。`
         : ''
 
       uni.setStorageSync('activeRouteNavigation', {
@@ -610,7 +857,8 @@ export default {
         travel_duration: navigationMetrics.travel_duration,
         stay_duration: navigationMetrics.stay_duration,
         segments: navigationMetrics.segments,
-        reoptimized_from_scenic_entry: outsideScenicArea,
+        reoptimized_from_scenic_entry: shouldReoptimize,
+        manual_order_locked: this.manualOrderChanged,
         start_notice: startNotice
       })
 
@@ -961,12 +1209,59 @@ export default {
   font-weight: bold;
 }
 
+.segment-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16rpx;
+  margin: 0 24rpx 16rpx;
+}
+
+.segment-list-title {
+  color: #37251a;
+  font-size: 28rpx;
+  font-weight: bold;
+}
+
+.order-status {
+  color: #8b7355;
+  font-size: 22rpx;
+}
+
+.order-status.customized {
+  color: #8c3228;
+  font-weight: bold;
+}
+
 .segment-swipe {
   position: relative;
   margin: 0 24rpx 20rpx;
   overflow: hidden;
   border-radius: 16rpx;
   background: #ff4d4f;
+}
+
+.segment-swipe.drag-source {
+  z-index: 10;
+  overflow: visible;
+  background: rgba(140, 50, 40, 0.1);
+  box-shadow: inset 0 0 0 2rpx rgba(140, 50, 40, 0.12);
+}
+
+.segment-swipe.drag-source .swipe-delete {
+  display: none !important;
+}
+
+.segment-swipe.drag-placeholder::before {
+  content: '';
+  position: absolute;
+  left: 16rpx;
+  right: 16rpx;
+  z-index: 20;
+  top: -12rpx;
+  height: 5rpx;
+  border-radius: 5rpx;
+  background: #8c3228;
 }
 
 .swipe-delete {
@@ -999,6 +1294,12 @@ export default {
 
 .segment-card.swiped {
   transform: translateX(-128rpx);
+}
+
+.segment-card.dragging {
+  z-index: 30;
+  opacity: 0.94;
+  box-shadow: 0 14rpx 40rpx rgba(55, 37, 26, 0.24);
 }
 
 .segment-index {
@@ -1048,6 +1349,28 @@ export default {
   flex-direction: column;
   gap: 8rpx;
   margin-left: 14rpx;
+}
+
+.drag-handle {
+  width: 56rpx;
+  height: 64rpx;
+  flex-shrink: 0;
+  margin-left: 10rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7rpx;
+  border-radius: 8rpx;
+  touch-action: none;
+  user-select: none;
+}
+
+.drag-line {
+  width: 30rpx;
+  height: 4rpx;
+  border-radius: 4rpx;
+  background: #8b7355;
 }
 
 .mini-btn {
