@@ -92,6 +92,18 @@ class RouteHistory(Base):
     spot_count = Column(Integer)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+class RouteShare(Base):
+    __tablename__ = "route_share"
+    __table_args__ = (
+        UniqueConstraint("share_id", name="uq_route_share_share_id"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    share_id = Column(String(64), nullable=False, index=True)
+    route_name = Column(String(255), nullable=False)
+    route_data = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 class RouteDistanceCache(Base):
     __tablename__ = "route_distance_cache"
 

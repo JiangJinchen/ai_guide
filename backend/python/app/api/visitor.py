@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import Spot, VisitorInteraction, VisitorBehavior, RouteHistory, RouteDistanceCache, SpotVisitMeta, SpotTag, AppUserBehavior, TicketProduct, ScenicActivity, VisitorFeedback
+from app.models import Spot, VisitorInteraction, VisitorBehavior, RouteHistory, RouteShare, RouteDistanceCache, SpotVisitMeta, SpotTag, AppUserBehavior, TicketProduct, ScenicActivity, VisitorFeedback
 from app.schemas import SpotResponse, VisitorInteractionResponse, VisitorFeedbackResponse
 from app.services.guide_asset_service import get_spot_guide_detail
 from typing import List, Optional
@@ -1703,6 +1703,9 @@ class SaveRouteRequest(BaseModel):
     user_id: str = "guest"
     route: dict
 
+class CreateRouteShareRequest(BaseModel):
+    route: dict
+
 class NavigationPoint(BaseModel):
     id: Optional[int | str] = None
     spot_id: Optional[int | str] = None
@@ -2624,7 +2627,8 @@ def select_route_spots(
     travel_mode,
     db: Optional[Session] = None,
     distance_memo=None,
-    start_spot_id=None
+    start_spot_id=None,
+    variant_type="classic"
 ):
     selected = list(required_spots)
     selected_ids = {route_spot_value(spot, "id") for spot in selected}
@@ -2636,10 +2640,21 @@ def select_route_spots(
         except Exception as exc:
             logger.exception("[ROUTE] 偏好标签/热度评分失败，降级为关键词评分: %s", exc)
             db.rollback()
+
+    def score_with_variant(spot):
+        base_score = score_spot_for_preferences(spot, preferences, popularity_scores)
+        if variant_type == "easy":
+            base_score *= 0.4
+            distance = estimate_distance(latitude, longitude, route_spot_value(spot, "latitude"), route_spot_value(spot, "longitude")) if latitude and longitude else 9999
+            base_score += max(0, 5000 - distance) * 0.0005
+        elif variant_type == "deep":
+            base_score *= 2.0
+        return base_score
+
     candidates = [
         spot for spot in sorted(
             spots,
-            key=lambda item: score_spot_for_preferences(item, preferences, popularity_scores),
+            key=score_with_variant,
             reverse=True
         )
         if route_spot_value(spot, "id") not in selected_ids
@@ -2683,9 +2698,9 @@ def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)
         raise HTTPException(status_code=404, detail="未找到选中的必去景点")
 
     variants = [
-        ("轻松线", 3),
-        ("经典线", 5),
-        ("深度线", 7)
+        ("轻松线", 3, "easy"),
+        ("经典线", 5, "classic"),
+        ("深度线", 7, "deep")
     ]
     routes = []
     seen_signatures = set()
@@ -2695,7 +2710,14 @@ def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)
     elif required_spots:
         base_label = "必去景点路线"
 
-    for variant_name, target_count in variants:
+    for variant_name, target_count, variant_type in variants:
+        if variant_type == "easy":
+            variant_budget = int(budget * 0.6)
+        elif variant_type == "deep":
+            variant_budget = int(budget * 1.4)
+        else:
+            variant_budget = budget
+
         if required_spots and not preferences:
             selected = required_spots
         else:
@@ -2703,14 +2725,15 @@ def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)
                 spots,
                 required_spots,
                 preferences,
-                budget,
+                variant_budget,
                 target_count,
                 request.latitude,
                 request.longitude,
                 travel_mode,
                 db,
                 distance_memo,
-                request.start_spot_id
+                request.start_spot_id,
+                variant_type
             )
         route = build_route(
             f"{base_label}{variant_name}",
@@ -2724,7 +2747,7 @@ def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)
             distance_memo,
             request.start_spot_id
         )
-        signature = tuple(item["id"] for item in route["route"])
+        signature = (variant_name, tuple(item["id"] for item in route["route"]))
         if signature in seen_signatures:
             continue
         seen_signatures.add(signature)
@@ -2782,6 +2805,30 @@ def get_route_history(user_id: str = "guest", limit: int = 20, db: Session = Dep
         }
         for item in records
     ]
+
+@router.post("/routes/share")
+def create_route_share(request: CreateRouteShareRequest, db: Session = Depends(get_db)):
+    route = dict(request.route or {})
+    share_id = uuid.uuid4().hex
+    share = RouteShare(
+        share_id=share_id,
+        route_name=route.get("route_name", "Route"),
+        route_data=json.dumps(route, ensure_ascii=False)
+    )
+    db.add(share)
+    db.commit()
+    return {"share_id": share_id}
+
+@router.get("/routes/share/{share_id}")
+def get_route_share(share_id: str, db: Session = Depends(get_db)):
+    share = db.query(RouteShare).filter(RouteShare.share_id == share_id).first()
+    if not share:
+        raise HTTPException(status_code=404, detail="Shared route not found")
+    try:
+        route = json.loads(share.route_data)
+    except (TypeError, json.JSONDecodeError):
+        raise HTTPException(status_code=500, detail="Shared route data is invalid")
+    return {"share_id": share.share_id, "route": route}
 
 @router.post("/routes/navigation")
 def generate_navigation_route(request: NavigationRouteRequest, db: Session = Depends(get_db)):

@@ -108,6 +108,8 @@
 import { get, post } from '@/utils/request'
 import { requestCurrentLocation } from '@/utils/location'
 
+const SHARE_BASE_URL = (import.meta.env?.VITE_SHARE_BASE_URL || '').replace(/\/$/, '')
+const LOCAL_HOST_PATTERN = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?/i
 const DEFAULT_LOCATION = { latitude: 31.42892, longitude: 120.09487 }
 const SCENIC_ENTRY_LOCATION = {
   ...DEFAULT_LOCATION,
@@ -141,6 +143,8 @@ export default {
       routeSpots: [],
       allSpots: [],
       userLocation: null,
+      shareMode: false,
+      shareId: '',
       popupSpot: null,
       adjustMode: false,
       savedOnce: false,
@@ -200,13 +204,25 @@ export default {
       })
     }
   },
-  onLoad() {
-    const route = uni.getStorageSync('activeRoutePlan')
-    if (route) {
-      const fromHistory = Boolean(route.__from_history)
-      delete route.__from_history
-      this.applyRoutePlan(route)
-      if (!fromHistory) this.saveRoute(true)
+  async onLoad(options = {}) {
+    const shareId = options.share_id || options.shareId
+    if (shareId) {
+      this.shareMode = true
+      this.shareId = decodeURIComponent(shareId)
+      try {
+        const response = await get(`/routes/share/${encodeURIComponent(this.shareId)}`)
+        this.applyRoutePlan(response.route || response, { persist: false })
+      } catch (e) {
+        uni.showToast({ title: 'Shared route is unavailable', icon: 'none' })
+      }
+    } else {
+      const route = uni.getStorageSync('activeRoutePlan')
+      if (route) {
+        const fromHistory = Boolean(route.__from_history)
+        delete route.__from_history
+        this.applyRoutePlan(route)
+        if (!fromHistory) this.saveRoute(true)
+      }
     }
     this.loadAllSpots()
     const startLocation = this.getRouteStartLocation()
@@ -215,6 +231,17 @@ export default {
       this.routeSpots = this.routeSpots.map(spot => ({ ...spot, style: this.pointStyle(spot) }))
     } else {
       this.refreshLocation()
+    }
+  },
+  onShareAppMessage() {
+    const routeName = this.routePlan?.route_name || '\u6e38\u89c8\u8def\u7ebf'
+    const path = this.shareId
+      ? `/pages/route-detail/index?share_id=${encodeURIComponent(this.shareId)}`
+      : '/pages/route-detail/index'
+    return {
+      title: `\u5206\u4eab\u8def\u7ebf\uff1a${routeName}`,
+      path,
+      desc: routeName
     }
   },
   methods: {
@@ -257,10 +284,12 @@ export default {
       const located = await this.refreshLocation({ allowCache: false, allowFallback: false })
       uni.showToast({ title: located ? '已重新定位' : '定位失败，请稍后重试', icon: 'none' })
     },
-    applyRoutePlan(route) {
-      this.routePlan = route
+    applyRoutePlan(route, options = {}) {
+      this.routePlan = JSON.parse(JSON.stringify(route || {}))
       this.routeSpots = (route.route || []).map(this.normalizeSpot).map(item => ({ ...item, style: this.pointStyle(item) }))
-      uni.setStorageSync('activeRoutePlan', this.routePlan)
+      if (options.persist !== false && !this.shareMode) {
+        uni.setStorageSync('activeRoutePlan', this.routePlan)
+      }
     },
     hasValidLocation(location) {
       const latitude = Number(location?.latitude)
@@ -516,7 +545,9 @@ export default {
         stay_duration: metrics.stay_duration,
         segments: metrics.segments
       }
-      uni.setStorageSync('activeRoutePlan', this.routePlan)
+      if (!this.shareMode) {
+        uni.setStorageSync('activeRoutePlan', this.routePlan)
+      }
     },
     navigateToSpot(spot) {
       if (!spot.latitude || !spot.longitude) {
@@ -615,12 +646,106 @@ export default {
         if (!silent) uni.showToast({ title: '保存失败', icon: 'none' })
       }
     },
-    shareRoute() {
-      const names = this.routeSpots.map((item, index) => `${index + 1}.${item.name}`).join(' -> ')
-      uni.setClipboardData({
-        data: `${this.routePlan.route_name}：${names}`,
-        success: () => uni.showToast({ title: '路线摘要已复制', icon: 'none' })
+    formatShareDistance(distance) {
+      const value = Number(distance || 0)
+      if (value < 1000) return `${Math.round(value)}\u7c73`
+      return `${(value / 1000).toFixed(1)}\u516c\u91cc`
+    },
+    async getShareUrl(path = '') {
+      if (!this.shareId && this.routePlan) {
+        try {
+          const res = await post('/routes/share', { route: this.routePlan })
+          this.shareId = res.share_id
+        } catch (e) {
+          console.warn('[SHARE] Failed to create share link:', e)
+        }
+      }
+      if (!this.shareId) return ''
+      const sharePath = `/pages/route-share/index?share_id=${encodeURIComponent(this.shareId)}`
+      if (SHARE_BASE_URL) {
+        return SHARE_BASE_URL.endsWith('/#')
+          ? `${SHARE_BASE_URL}${sharePath}`
+          : `${SHARE_BASE_URL}/#${sharePath}`
+      }
+      if (typeof window !== 'undefined' && window.location?.origin) {
+        return `${window.location.origin}/#${sharePath}`
+      }
+      return `http://localhost:8080/#${sharePath}`
+    },
+    async buildSharePayload() {
+      const routeName = this.routePlan?.route_name || '\u6e38\u89c8\u8def\u7ebf'
+      const path = this.shareId
+        ? `/pages/route-detail/index?share_id=${encodeURIComponent(this.shareId)}`
+        : '/pages/route-detail/index'
+      const names = this.routeSpots
+        .map((item, index) => `${index + 1}. ${item.name || item.spot_name || '\u666f\u70b9'}`)
+        .join(' -> ')
+      const summary = [
+        `${routeName}`,
+        `\u9884\u8ba1\u7528\u65f6\uff1a${this.totalDuration}\u5206\u949f`,
+        `\u9884\u8ba1\u8ddd\u79bb\uff1a${this.formatShareDistance(this.totalDistance)}`,
+        `\u6e38\u89c8\u987a\u5e8f\uff1a${names || '\u6682\u65e0\u666f\u70b9'}`
+      ]
+      const url = await this.getShareUrl(path)
+      if (url) summary.push(`\u6253\u5f00\u94fe\u63a5\uff1a${url}`)
+      return {
+        title: `\u5206\u4eab\u8def\u7ebf\uff1a${routeName}`,
+        text: summary.join('\n'),
+        path,
+        url
+      }
+    },
+    async createShareRecord() {
+      const response = await post('/routes/share', {
+        route: JSON.parse(JSON.stringify(this.routePlan))
       })
+      if (!response?.share_id) throw new Error('Share id was not returned')
+      this.shareId = response.share_id
+      return this.shareId
+    },
+    copyShareText(text) {
+      uni.setClipboardData({
+        data: text,
+        success: () => uni.showToast({ title: '\u8def\u7ebf\u5206\u4eab\u5185\u5bb9\u5df2\u590d\u5236', icon: 'none' }),
+        fail: () => uni.showToast({ title: '\u5206\u4eab\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5', icon: 'none' })
+      })
+    },
+    async shareRoute() {
+      if (!this.routePlan) {
+        uni.showToast({ title: '\u6682\u65e0\u53ef\u5206\u4eab\u8def\u7ebf', icon: 'none' })
+        return
+      }
+      this.syncRoutePlan()
+      const payload = await this.buildSharePayload()
+
+      // #ifdef H5
+      if (typeof navigator !== 'undefined' && navigator.share) {
+        const shareData = {
+          title: payload.title,
+          text: payload.text
+        }
+        if (payload.url) shareData.url = payload.url
+        try {
+          await navigator.share(shareData)
+          return
+        } catch (error) {
+          if (error?.name === 'AbortError') return
+        }
+      }
+      // #endif
+
+      // #ifdef APP-PLUS
+      uni.shareWithSystem({
+        type: 'text',
+        summary: payload.text,
+        href: payload.url || undefined,
+        success: () => {},
+        fail: () => this.copyShareText(payload.text)
+      })
+      return
+      // #endif
+
+      this.copyShareText(payload.text)
     },
     goToGuide(id) {
       uni.navigateTo({ url: `/pages/guide/index?spot_id=${id}` })
