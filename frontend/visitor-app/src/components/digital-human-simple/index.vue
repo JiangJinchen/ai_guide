@@ -1,6 +1,6 @@
 <template>
-  <view class="digital-human">
-    <view class="live2d-stage" ref="stageRef">
+  <view class="digital-human" :class="{ compact }" :style="containerStyle">
+    <view class="live2d-stage" ref="stageRef" :style="stageStyle">
       <view v-if="!isReady" class="live2d-mask">
         <view class="live2d-placeholder">
           <text class="placeholder-title">{{ loadText }}</text>
@@ -59,6 +59,10 @@ export default {
     speaking: {
       type: Boolean,
       default: false
+    },
+    compact: {
+      type: Boolean,
+      default: false
     }
   },
   emits: ['ready', 'error'],
@@ -82,7 +86,8 @@ export default {
       mouthUpdateHandler: null,
       tickerMouthHandler: null,
       live2dTickerHandler: null,
-      mediaElementSource: null
+      mediaElementSource: null,
+      sourceAudioElement: null
     }
   },
   computed: {
@@ -91,6 +96,19 @@ export default {
     },
     loadSubText() {
       return this.loadError || '正在准备数字人模型'
+    },
+    compactMinHeight() {
+      return this.compact ? '220rpx' : '420rpx'
+    },
+    containerStyle() {
+      return {
+        minHeight: this.compactMinHeight
+      }
+    },
+    stageStyle() {
+      return {
+        minHeight: this.compactMinHeight
+      }
     }
   },
   watch: {
@@ -303,7 +321,7 @@ export default {
       } catch (e) {}
     },
     startLipSync() {
-      this.stopLipSync()
+      this.stopLipSync({ keepAudioGraph: true })
       this.isSpeakingNow = true
       this.lipSyncTimerType = 'interval'
       this.lipSyncTimer = setInterval(() => {
@@ -314,23 +332,37 @@ export default {
       }, 50)
     },
     async startRealLipSync(audioElement) {
-      this.stopLipSync()
+      this.stopLipSync({ keepAudioGraph: true })
       this.isSpeakingNow = true
       try {
         if (!window.AudioContext && !window.webkitAudioContext) {
           this.startLipSync()
           return
         }
-        
-        this.audioContext = new (window.AudioContext || window.webkitAudioContext)()
-        this.analyser = this.audioContext.createAnalyser()
-        this.analyser.fftSize = 256
-        const bufferLength = this.analyser.frequencyBinCount
-        this.dataArray = new Uint8Array(bufferLength)
-        
-        this.mediaElementSource = this.audioContext.createMediaElementSource(audioElement)
-        this.mediaElementSource.connect(this.analyser)
-        this.analyser.connect(this.audioContext.destination)
+
+        const canReuseAudioGraph = this.audioContext &&
+          this.audioContext.state !== 'closed' &&
+          this.analyser &&
+          this.mediaElementSource &&
+          this.sourceAudioElement === audioElement
+
+        if (!canReuseAudioGraph) {
+          this.releaseAudioGraph()
+          this.audioContext = new (window.AudioContext || window.webkitAudioContext)()
+          this.analyser = this.audioContext.createAnalyser()
+          this.analyser.fftSize = 256
+          const bufferLength = this.analyser.frequencyBinCount
+          this.dataArray = new Uint8Array(bufferLength)
+
+          this.mediaElementSource = this.audioContext.createMediaElementSource(audioElement)
+          this.mediaElementSource.connect(this.analyser)
+          this.analyser.connect(this.audioContext.destination)
+          this.sourceAudioElement = audioElement
+        }
+
+        if (this.audioContext && this.audioContext.state === 'suspended') {
+          await this.audioContext.resume()
+        }
         
         const updateMouth = () => {
           if (!this.isSpeakingNow || !this.analyser) return
@@ -369,7 +401,7 @@ export default {
         coreModel.addParameterValueById(MOUTH_PARAM_ID, value, 1)
       }
     },
-    stopLipSync() {
+    stopLipSync(options = {}) {
       this.isSpeakingNow = false
       if (this.lipSyncTimer) {
         if (this.lipSyncTimerType === 'animationFrame') {
@@ -380,14 +412,20 @@ export default {
         this.lipSyncTimer = null
         this.lipSyncTimerType = ''
       }
+      if (options.releaseAudioGraph) {
+        this.releaseAudioGraph()
+      }
+      this.mouthOpenValue = 0
+    },
+    releaseAudioGraph() {
       if (this.audioContext) {
         this.audioContext.close()
         this.audioContext = null
-        this.analyser = null
-        this.dataArray = null
-        this.mediaElementSource = null
       }
-      this.mouthOpenValue = 0
+      this.analyser = null
+      this.dataArray = null
+      this.mediaElementSource = null
+      this.sourceAudioElement = null
     },
     startSpeaking(options = {}) {
       if (!this.isReady) return
@@ -431,7 +469,7 @@ export default {
       }
     },
     destroyLive2D() {
-      this.stopLipSync()
+      this.stopLipSync({ releaseAudioGraph: true })
       this.unbindMouthUpdate()
       this.unbindLive2DTicker()
       if (this.app) {

@@ -89,12 +89,26 @@
     <view class="empty-state">
       <text>暂无可导航路线</text>
     </view>
+
+    <FeedbackModal
+      :visible="showFeedbackModal"
+      :title="feedbackModalConfig.title"
+      :content="feedbackModalConfig.content"
+      :params="feedbackModalConfig.params"
+      :type="feedbackModalConfig.type"
+      :target-key="feedbackModalConfig.targetKey"
+      @close="showFeedbackModal = false"
+      @later="handleFeedbackLater"
+      @submit="handleFeedbackSubmit"
+    />
   </view>
 </template>
 
 <script>
+import FeedbackModal from '@/components/FeedbackModal/index.vue'
 import { get, post } from '@/utils/request'
 import { requestCurrentLocation } from '@/utils/location'
+import { promptForFeedback, markFeedbackPrompt, openFeedbackPage } from '@/utils/feedback'
 import startIcon from '@/static/map/起点.png'
 import waypointIcon from '@/static/map/途经点.png'
 
@@ -112,6 +126,9 @@ const AUTO_ADVANCE_COOLDOWN_MS = 2500
 const AUTO_REPLAN_COOLDOWN_MS = 25000
 
 export default {
+  components: {
+    FeedbackModal
+  },
   data() {
     return {
       navigationPlan: null,
@@ -130,7 +147,17 @@ export default {
       trackingTimer: null,
       simulationTimer: null,
       simulationIndex: 0,
-      hasReordered: false
+      hasReordered: false,
+      navigationSessionId: '',
+      isPageActive: true,
+      showFeedbackModal: false,
+      feedbackModalConfig: {
+        title: '',
+        content: '',
+        params: {},
+        type: '',
+        targetKey: ''
+      }
     }
   },
   computed: {
@@ -330,7 +357,34 @@ export default {
       }
     }
   },
-  onLoad() {
+  onLoad(options) {
+    this.navigationSessionId = `route_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+    if (options && options.latitude && options.longitude) {
+      const targetLat = Number(options.latitude)
+      const targetLng = Number(options.longitude)
+      const targetName = options.entity_name || '目的地'
+      
+      this.navigationPlan = {
+        route_name: `前往${targetName}`,
+        start_location: DEFAULT_LOCATION,
+        waypoints: [{
+          id: 'target',
+          name: targetName,
+          latitude: targetLat,
+          longitude: targetLng,
+          order: 1
+        }],
+        total_distance: 0,
+        travel_mode_label: '步行'
+      }
+      
+      this.currentLocation = null
+      this.fetchScenicEntrance().then(() => {
+        this.fetchNavigationRoute()
+      })
+      return
+    }
+    
     const plan = uni.getStorageSync('activeRouteNavigation')
     this.navigationPlan = plan || null
     if (this.navigationPlan) {
@@ -340,8 +394,17 @@ export default {
       })
     }
   },
+  onShow() {
+    this.isPageActive = true
+  },
+  onHide() {
+    this.isPageActive = false
+    this.showFeedbackModal = false
+  },
   onUnload() {
+    this.isPageActive = false
     this.stopRealtimeTracking()
+    this.showFeedbackModal = false
   },
   methods: {
     isValidPoint(point) {
@@ -688,13 +751,93 @@ export default {
       }
       this.completeNavigation()
     },
+    /*
     completeNavigation() {
       if (this.navigationCompleted) return
       this.navigationCompleted = true
       this.trackingStatus = 'completed'
       this.isTracking = false
       this.clearTrackingTimers()
+      setTimeout(() => this.maybePromptRouteFeedback(), 800)
       uni.showToast({ title: '已到达终点', icon: 'success' })
+    },
+    getRouteFeedbackKey() {
+      const planId = this.navigationPlan?.route_id || this.navigationPlan?.id
+      if (planId) return String(planId)
+      const waypointKey = (this.waypoints || []).map(spot => this.pointKey(spot)).join('-')
+      return `${this.routeName}:${waypointKey || this.navigationSessionId || 'default'}`
+    },
+    maybePromptRouteFeedback() {
+      const targetKey = this.getRouteFeedbackKey()
+      promptForFeedback({
+        type: 'route',
+        targetKey,
+        title: '评价',
+        content: '导航已经结束，愿意花几秒钟评价这条路线和导航指引吗？',
+        params: {
+          feedback_type: 'route',
+          target_type: 'route',
+          target_id: targetKey,
+          target_name: this.routeName,
+          source: 'route-navigation',
+          session_id: this.navigationSessionId
+        }
+      })
+    },
+    */
+    completeNavigation() {
+      if (this.navigationCompleted) return
+      this.navigationCompleted = true
+      this.trackingStatus = 'completed'
+      this.isTracking = false
+      this.clearTrackingTimers()
+      setTimeout(() => this.maybePromptRouteFeedback(), 800)
+      uni.showToast({ title: 'Arrived', icon: 'success' })
+    },
+    getRouteFeedbackKey() {
+      const planId = this.navigationPlan?.route_id || this.navigationPlan?.id
+      if (planId) return String(planId)
+      const waypointKey = (this.waypoints || []).map(spot => this.pointKey(spot)).join('-')
+      return `${this.routeName}:${waypointKey || this.navigationSessionId || 'default'}`
+    },
+    async maybePromptRouteFeedback() {
+      if (!this.isPageActive) return
+      const targetKey = this.getRouteFeedbackKey()
+      const result = await promptForFeedback({
+        type: 'route',
+        targetKey,
+        title: '评价',
+        content: '导航已经结束，愿意花几秒钟评价这条路线和导航指引吗？',
+        params: {
+          feedback_type: 'route',
+          target_type: 'route',
+          target_id: targetKey,
+          target_name: this.routeName,
+          source: 'route-navigation',
+          session_id: this.navigationSessionId
+        },
+        useCustomModal: true
+      })
+      if (result && result.shouldShow) {
+        this.feedbackModalConfig = {
+          title: result.title,
+          content: result.content,
+          params: result.params,
+          type: result.type,
+          targetKey: result.targetKey
+        }
+        this.showFeedbackModal = true
+      }
+    },
+    handleFeedbackLater() {
+      if (this.feedbackModalConfig.type && this.feedbackModalConfig.targetKey) {
+        markFeedbackPrompt(this.feedbackModalConfig.type, this.feedbackModalConfig.targetKey, 'dismissed')
+      }
+    },
+    handleFeedbackSubmit() {
+      if (this.feedbackModalConfig.params) {
+        openFeedbackPage(this.feedbackModalConfig.params)
+      }
     },
     markWaypointArrived(spot) {
       const key = this.pointKey(spot)

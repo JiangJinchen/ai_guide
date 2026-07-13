@@ -46,10 +46,16 @@ class KnowledgeService:
 分类：{category}
             """.strip()
 
-            # 计算匹配分数
+            # 计算匹配分数，标题匹配权重更高
             score = self.calculate_score(
                 full_text, query_words, query_fragments
             )
+            
+            title_lower = title.lower()
+            for word in query_words:
+                if word in title_lower:
+                    score += 8
+            
             if score > 0:
                 scored_results.append({
                     "content": full_text,
@@ -61,9 +67,10 @@ class KnowledgeService:
         # ----------------------
         spots = self.db.query(Spot).all()
         for spot in spots:
+            spot_name = spot.spot_name or ''
             # 全字段合并成一段完整讲解文本
             full_text = f"""
-景点名称：{spot.spot_name or ''}
+景点名称：{spot_name}
 景区：{spot.scenic_area_name or ''}
 介绍：{spot.description or ''}
 文化内涵：{spot.culture_connotation or ''}
@@ -72,9 +79,16 @@ class KnowledgeService:
 位置：{spot.location or ''}
             """.strip()
 
+            # 计算匹配分数
             score = self.calculate_score(
                 full_text, query_words, query_fragments
             )
+            
+            spot_name_lower = spot_name.lower()
+            for word in query_words:
+                if word in spot_name_lower:
+                    score += 10
+            
             if score > 0:
                 scored_results.append({
                     "content": full_text,

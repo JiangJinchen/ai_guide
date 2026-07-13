@@ -3,8 +3,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import Spot, VisitorInteraction, VisitorBehavior, RouteHistory, RouteDistanceCache, SpotVisitMeta, SpotTag, AppUserBehavior, TicketProduct, ScenicActivity
-from app.schemas import SpotResponse, VisitorInteractionResponse
+from app.models import Spot, VisitorInteraction, VisitorBehavior, RouteHistory, RouteDistanceCache, SpotVisitMeta, SpotTag, AppUserBehavior, TicketProduct, ScenicActivity, VisitorFeedback
+from app.schemas import SpotResponse, VisitorInteractionResponse, VisitorFeedbackResponse
+from app.services.guide_asset_service import get_spot_guide_detail
 from typing import List, Optional
 import os
 import httpx
@@ -641,6 +642,14 @@ def get_spot_guide(spot_id: int, db: Session = Depends(get_db)):
     spot = db.query(Spot).filter(Spot.id == spot_id).first()
     if not spot:
         raise HTTPException(status_code=404, detail="景点不存在")
+    
+    guide_detail = get_spot_guide_detail(db, spot_id, "standard", "female")
+    audio_url = guide_detail.get("guide_asset", {}).get("audio_url", "") if guide_detail else ""
+    
+    print(f"[AUDIO DEBUG] get_spot_guide called for spot_id={spot_id}")
+    print(f"[AUDIO DEBUG] guide_detail: {guide_detail}")
+    print(f"[AUDIO DEBUG] audio_url: {audio_url}")
+    
     return {
         "spot_id": spot_id,
         "scenic_area": spot.scenic_area_name,
@@ -648,7 +657,9 @@ def get_spot_guide(spot_id: int, db: Session = Depends(get_db)):
         "content": spot.description,
         "culture": spot.culture_connotation,
         "highlights": spot.highlights,
-        "open_info": spot.open_info
+        "open_info": spot.open_info,
+        "audio_url": audio_url,
+        "guide_asset": guide_detail.get("guide_asset", None) if guide_detail else None
     }
 
 # ==============================
@@ -714,27 +725,148 @@ def get_chat_history(user_id: str, db: Session = Depends(get_db)):
     return history
 
 # ==============================
-# 6. 反馈评分接口
+# 6. 反馈与评价接口
 # ==============================
 class FeedbackRequest(BaseModel):
     user_id: str
-    chat_content: str
+    feedback_type: str = "app"
+    target_type: Optional[str] = None
+    target_id: Optional[str] = None
+    target_name: Optional[str] = None
+    source: Optional[str] = None
+    session_id: Optional[str] = None
     satisfaction_score: float
     comment: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    chat_content: Optional[str] = None
 
+def normalize_feedback_tags(value):
+    if not value:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in re.split(r"[,，;；\s]+", value) if item.strip()]
+    return []
+
+def parse_feedback_payload(raw_content):
+    if not raw_content:
+        return {}
+    if isinstance(raw_content, dict):
+        return raw_content
+    try:
+        payload = json.loads(raw_content)
+        return payload if isinstance(payload, dict) else {"comment": str(payload)}
+    except Exception:
+        return {"comment": str(raw_content)}
+
+def serialize_feedback_record(record):
+    payload = parse_feedback_payload(record.content)
+    tags = normalize_feedback_tags(payload.get("tags"))
+    score = record.satisfaction_score if record.satisfaction_score is not None else payload.get("satisfaction_score")
+    feedback_type = payload.get("feedback_type") or "app"
+    target_type = payload.get("target_type") or ("app" if feedback_type == "app" else feedback_type)
+    target_name = payload.get("target_name") or ("App 使用体验" if feedback_type == "app" else "")
+    return {
+        "id": record.id,
+        "user_id": record.visitor_id,
+        "feedback_type": feedback_type,
+        "target_type": target_type,
+        "target_id": payload.get("target_id") or "",
+        "target_name": target_name,
+        "source": payload.get("source") or "",
+        "session_id": record.session_id or payload.get("session_id") or "",
+        "score": score,
+        "satisfaction_score": score,
+        "comment": payload.get("comment") or record.reply_text or "",
+        "tags": tags,
+        "emotion": record.emotion,
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+    }
+
+def build_feedback_payload(request: FeedbackRequest):
+    feedback_type = request.feedback_type or "app"
+    target_type = request.target_type or ("app" if feedback_type == "app" else feedback_type)
+    target_id = request.target_id or ("app" if feedback_type == "app" else "")
+    target_name = request.target_name or ("App 使用体验" if feedback_type == "app" else "")
+    comment = request.comment or request.chat_content or ""
+    return {
+        "feedback_type": feedback_type,
+        "target_type": target_type,
+        "target_id": str(target_id or ""),
+        "target_name": target_name,
+        "source": request.source or "profile",
+        "session_id": request.session_id or "",
+        "satisfaction_score": request.satisfaction_score,
+        "comment": comment,
+        "tags": normalize_feedback_tags(request.tags),
+        "chat_content": request.chat_content or "",
+    }
+
+def serialize_visitor_feedback(record: VisitorFeedback):
+    tags = normalize_feedback_tags(record.tags)
+    return {
+        "id": record.id,
+        "user_id": record.visitor_id,
+        "feedback_type": record.feedback_type or "app",
+        "target_type": record.target_type or ("app" if record.feedback_type == "app" else record.feedback_type),
+        "target_id": record.target_id or "",
+        "target_name": record.target_name or ("App 使用体验" if record.feedback_type == "app" else ""),
+        "source": record.source or "",
+        "session_id": record.session_id or "",
+        "score": record.satisfaction_score,
+        "satisfaction_score": record.satisfaction_score,
+        "comment": record.comment or "",
+        "tags": tags,
+        "emotion": record.emotion,
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+    }
+
+@router.post("/feedback/submit")
 @router.post("/feedback")
 def submit_feedback(request: FeedbackRequest, db: Session = Depends(get_db)):
-    """用户提交对AI回答的评分和反馈"""
-    feedback = VisitorInteraction(
+    feedback_type = request.feedback_type or "app"
+    target_type = request.target_type or ("app" if feedback_type == "app" else feedback_type)
+    target_id = request.target_id or ("app" if feedback_type == "app" else "")
+    target_name = request.target_name or ("App 使用体验" if feedback_type == "app" else "")
+    comment = request.comment or request.chat_content or ""
+    
+    feedback = VisitorFeedback(
         visitor_id=request.user_id,
-        interaction_type="feedback",
-        content=request.chat_content,
+        session_id=request.session_id or None,
+        feedback_type=feedback_type,
+        target_type=target_type,
+        target_id=str(target_id or ""),
+        target_name=target_name,
+        source=request.source or "profile",
+        tags=json.dumps(normalize_feedback_tags(request.tags), ensure_ascii=False),
+        comment=comment,
         satisfaction_score=request.satisfaction_score,
         emotion="satisfied" if request.satisfaction_score >= 4 else "dissatisfied"
     )
     db.add(feedback)
     db.commit()
-    return {"status": "ok", "message": "反馈提交成功"}
+    db.refresh(feedback)
+    return {"status": "ok", "message": "Feedback submitted successfully", "record": serialize_visitor_feedback(feedback)}
+
+@router.get("/feedback/records")
+def get_feedback_records(
+    user_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    feedback_type: Optional[str] = None,
+    db: Session = Depends(get_db),
+    request_obj: Request = None
+):
+    visitor_id = request_obj.headers.get("X-User-Id", user_id) if request_obj else user_id
+    query = db.query(VisitorFeedback)\
+        .filter(VisitorFeedback.visitor_id == visitor_id)\
+        .order_by(VisitorFeedback.created_at.desc())
+    
+    if feedback_type:
+        query = query.filter(VisitorFeedback.feedback_type == feedback_type)
+    
+    records = query.limit(limit).all()
+    return [serialize_visitor_feedback(record) for record in records]
 
 # ==============================
 # 6.5 APP行为记录接口
@@ -2949,3 +3081,49 @@ def get_visitor_behavior(db: Session = Depends(get_db)):
 def get_visitor_behavior_by_user(visitor_id: str, db: Session = Depends(get_db)):
     data = db.query(VisitorBehavior).filter(VisitorBehavior.visitor_id == visitor_id).all()
     return data
+
+
+# ==============================
+# 12. 客服中心接口
+# ==============================
+@router.get("/customer-service")
+def get_customer_service_info():
+    return {
+        "phone": "400-828-8888",
+        "business_hours": "08:00 - 17:30",
+        "holiday_hours": "08:00 - 18:00",
+        "faqs": [
+            {
+                "question": "门票有效期是多久？",
+                "answer": "门票当日有效，入园后可全天游览。如需二次入园，请在出口处办理入园登记。"
+            },
+            {
+                "question": "景区内可以使用无人机吗？",
+                "answer": "为保障游客安全及文物保护，景区内禁止使用无人机等飞行设备。"
+            },
+            {
+                "question": "景区提供行李寄存服务吗？",
+                "answer": "游客中心设有行李寄存处，提供免费寄存服务，营业时间与景区同步。"
+            },
+            {
+                "question": "园内观光车如何收费？",
+                "answer": "观光车单次乘坐15元/人，全天通票30元/人，可在各站点自由上下车。"
+            },
+            {
+                "question": "景区内有餐饮服务吗？",
+                "answer": "景区内设有素斋馆、咖啡厅及多个小吃售卖点，提供素食、简餐及特色小吃。"
+            },
+            {
+                "question": "儿童和老人有优惠政策吗？",
+                "answer": "6周岁以下或身高1.4米以下儿童免费；60-69周岁老人半价；70周岁以上老人免费。"
+            },
+            {
+                "question": "遇到紧急情况怎么办？",
+                "answer": "请立即拨打景区急救电话400-828-8888转1，或联系就近的工作人员寻求帮助。"
+            },
+            {
+                "question": "可以携带宠物入园吗？",
+                "answer": "除导盲犬外，景区内禁止携带宠物入园。"
+            }
+        ]
+    }

@@ -14,7 +14,7 @@
     <view class="section-card">
       <view class="section-head">
         <text class="section-title">我的游览偏好</text>
-        <text class="section-sub">基于浏览行为分析</text>
+        <text class="section-sub">基于游览行为分析</text>
       </view>
       <view class="profile-tags">
         <view 
@@ -73,34 +73,45 @@
 
     <view class="section-card">
       <view class="menu-row" @click="goToFeedback">
-        <text class="menu-title">服务评价</text>
-        <text class="menu-arrow">›</text>
+        <text class="menu-title">评价与反馈</text>
+        <text class="menu-arrow">></text>
       </view>
       <view class="menu-row" @click="contactService">
         <text class="menu-title">联系景区人工客服</text>
-        <text class="menu-arrow">›</text>
+        <text class="menu-arrow">></text>
       </view>
       <view class="menu-row danger" @click="logout">
         <text class="menu-title">退出登录</text>
-        <text class="menu-arrow">›</text>
+        <text class="menu-arrow">></text>
       </view>
     </view>
 
     <text class="version">灵山胜境 AI导览 v1.0.0</text>
+
+    <FeedbackModal 
+      ref="feedbackModal" 
+      @submit="handleFeedbackSubmit"
+    />
   </view>
 </template>
 
 <script>
 import { get } from '@/utils/request'
+import { promptForFeedback } from '@/utils/feedback'
+import FeedbackModal from '@/components/FeedbackModal'
 
 export default {
+  components: {
+    FeedbackModal
+  },
   data() {
     return {
       userId: '',
       nickname: '灵山游客',
       signature: '愿今日山水有好风',
       userProfile: {},
-      footprints: []
+      footprints: [],
+      isPageActive: true
     }
   },
   computed: {
@@ -119,9 +130,6 @@ export default {
       this.signature = saved.signature || this.signature
     }
     this.loadUserProfile()
-  },
-  onShow() {
-    this.loadFootprints()
   },
   methods: {
     async loadUserProfile() {
@@ -184,19 +192,49 @@ export default {
       uni.navigateTo({ url: `/pages/guide/index?spot_id=${id}` })
     },
     goToFeedback() {
-      uni.navigateTo({ url: '/pages/feedback/index' })
+      uni.navigateTo({
+        url: '/pages/feedback/index?feedback_type=app&target_type=app&target_id=app&target_name=App%E4%BD%BF%E7%94%A8%E4%BD%93%E9%AA%8C&source=profile'
+      })
+    },
+    maybePromptAppFeedback() {
+      if (!this.isPageActive) return
+      const launchCount = Number(uni.getStorageSync('appLaunchCount') || 0)
+      if (launchCount < 3) return
+      this.$refs.feedbackModal.open({
+        title: '评价',
+        content: '如果你愿意，花几秒钟告诉我们 App 哪些地方好用、哪些地方还需要改进。',
+        params: {
+          feedback_type: 'app',
+          target_type: 'app',
+          target_id: 'app',
+          target_name: 'App 使用体验',
+          source: 'profile'
+        }
+      })
+    },
+    handleFeedbackSubmit(data) {
+      this.$refs.feedbackModal.close()
+    },
+    onHide() {
+      this.isPageActive = false
+      this.$refs.feedbackModal?.close()
+    },
+    onUnload() {
+      this.isPageActive = false
+      this.$refs.feedbackModal?.close()
+    },
+    onShow() {
+      this.isPageActive = true
+      this.loadFootprints()
+      this.maybePromptAppFeedback()
     },
     contactService() {
-      uni.showModal({
-        title: '人工客服',
-        content: '后续可接入景区客服电话、在线客服或小程序客服能力。',
-        showCancel: false
-      })
+      uni.navigateTo({ url: '/pages/customer-service/index' })
     },
     logout() {
       uni.showModal({
         title: '退出登录',
-        content: '将清除当前游客身份并生成新的游客ID。',
+        content: '这将清除当前游客身份并生成新的访客ID。',
         success: (res) => {
           if (res.confirm) {
             const userId = 'visitor_' + Date.now()

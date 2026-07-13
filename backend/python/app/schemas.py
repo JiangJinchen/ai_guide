@@ -59,6 +59,7 @@ class DigitalHumanConfigResponse(DigitalHumanConfigBase):
 # ======================
 class VisitorInteractionBase(BaseModel):
     visitor_id: str
+    session_id: Optional[str] = None
     interaction_type: Optional[str] = None
     content: Optional[str] = None
     emotion: Optional[str] = None
@@ -69,10 +70,46 @@ class VisitorInteractionCreate(VisitorInteractionBase):
 
 class VisitorInteractionResponse(VisitorInteractionBase):
     id: int
+    reply_text: Optional[str] = None
     created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
+# ======================
+# 游客反馈
+# ======================
+class VisitorFeedbackBase(BaseModel):
+    visitor_id: str
+    session_id: Optional[str] = None
+    feedback_type: Optional[str] = None
+    target_type: Optional[str] = None
+    target_id: Optional[str] = None
+    target_name: Optional[str] = None
+    source: Optional[str] = None
+    tags: Optional[str] = None
+    comment: Optional[str] = None
+    satisfaction_score: Optional[float] = None
+    emotion: Optional[str] = None
+
+class VisitorFeedbackCreate(VisitorFeedbackBase):
+    pass
+
+class VisitorFeedbackResponse(VisitorFeedbackBase):
+    id: int
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+class ChatSessionResponse(BaseModel):
+    session_id: str
+    title: str
+    preview: str
+    turn_count: int
+    started_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    latest_message_at: Optional[datetime] = None
 
 class VisitorBehaviorBase(BaseModel):
     visitor_id: str

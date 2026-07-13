@@ -35,6 +35,17 @@
         >
           <text class="message-role">{{ msg.role === 'user' ? '游客' : '数字人' }}</text>
           <text class="message-text">{{ msg.text }}</text>
+          <view class="service-actions" v-if="msg.service_actions && msg.service_actions.length > 0">
+            <view 
+              class="service-action-item" 
+              v-for="(action, actionIndex) in msg.service_actions" 
+              :key="actionIndex"
+              @click="navigateToService(action)"
+            >
+              <text class="service-action-icon">{{ action.icon }}</text>
+              <text class="service-action-name">{{ serviceActionLabel(action) }}</text>
+            </view>
+          </view>
         </view>
       </scroll-view>
 
@@ -55,14 +66,73 @@
             {{ status === 'listen' ? '正在聆听中' : status === 'recognizing' ? '正在识别中' : '正在思考中' }}
           </text>
         </view>
-        <input
-          class="text-input"
-          :disabled="status === 'listen' || status === 'recognizing' || status === 'think'"
-          :placeholder="status === 'listen' ? '正在聆听，请说话...' : status === 'recognizing' ? '正在识别语音...' : status === 'think' ? '请稍候，正在思考中...' : '也可以输入文字询问'"
-          confirm-type="send"
-          @confirm="sendText"
-        />
-        <button class="send-button" :disabled="status === 'listen' || status === 'recognizing' || status === 'think'" @click="sendText">发送</button>
+        <view class="input-tools">
+          <view class="emoji-trigger" @click="toggleEmojiPanel">
+            <text class="emoji-icon">😊</text>
+          </view>
+          <input
+            class="text-input"
+            v-model="inputText"
+            :disabled="status === 'listen' || status === 'recognizing' || status === 'think'"
+            :placeholder="status === 'listen' ? '正在聆听，请说话...' : status === 'recognizing' ? '正在识别语音...' : status === 'think' ? '请稍候，正在思考中...' : '也可以输入文字询问'"
+            confirm-type="send"
+            @confirm="sendText"
+          />
+          <button class="send-button" :disabled="status === 'listen' || status === 'recognizing' || status === 'think' || !inputText.trim()" @click="sendText">发送</button>
+        </view>
+        
+        <view class="emoji-panel" v-if="showEmojiPanel">
+          <view class="emoji-grid">
+            <view 
+              class="emoji-item" 
+              v-for="(item, index) in emojiList" 
+              :key="index" 
+              @click="selectEmoji(item)"
+            >
+              <text class="emoji-char">{{ item.emoji }}</text>
+              <text class="emoji-label">{{ item.label }}</text>
+            </view>
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <FeedbackModal
+      :visible="showFeedbackModal"
+      :title="feedbackModalConfig.title"
+      :content="feedbackModalConfig.content"
+      :params="feedbackModalConfig.params"
+      :type="feedbackModalConfig.type"
+      :target-key="feedbackModalConfig.targetKey"
+      @close="showFeedbackModal = false"
+      @later="handleFeedbackLater"
+      @submit="handleFeedbackSubmit"
+    />
+
+    <view class="history-mask" v-if="showHistoryPanel" @click="closeHistoryPanel">
+      <view class="history-sheet" @click.stop>
+        <view class="history-head">
+          <text class="history-title-main">近期会话</text>
+          <button class="history-close" @click="closeHistoryPanel">×</button>
+        </view>
+        <scroll-view class="history-list" scroll-y>
+          <view class="history-empty" v-if="historyLoading">正在加载...</view>
+          <view class="history-empty" v-else-if="historySessions.length === 0">暂无历史会话</view>
+          <view
+            class="history-session"
+            :class="{ active: item.session_id === chatSessionId }"
+            v-for="item in historySessions"
+            :key="item.session_id"
+            @click="selectHistorySession(item)"
+          >
+            <view class="history-session-top">
+              <text class="history-session-title">{{ item.title || '未命名会话' }}</text>
+              <text class="history-session-time">{{ formatHistoryTime(item.latest_message_at || item.updated_at) }}</text>
+            </view>
+            <text class="history-session-preview">{{ item.preview || '点击查看完整对话' }}</text>
+            <text class="history-session-count">{{ item.turn_count || 0 }} 轮对话</text>
+          </view>
+        </scroll-view>
       </view>
     </view>
 
@@ -84,11 +154,15 @@
 
 <script>
 import DigitalHuman from '@/components/digital-human-simple/index.vue'
+import FeedbackModal from '@/components/FeedbackModal/index.vue'
 import { get, post } from '@/utils/request'
+import { requestCurrentLocation, getLocationErrorMessage } from '@/utils/location'
+import { promptForFeedback, markFeedbackPrompt, openFeedbackPage } from '@/utils/feedback'
 
 export default {
   components: {
-    DigitalHuman
+    DigitalHuman,
+    FeedbackModal
   },
   data() {
     return {
@@ -110,6 +184,21 @@ export default {
       h5AudioChunks: [],
       h5InputSampleRate: 44100,
       voiceStartAt: 0,
+      chatSessionId: '',
+      chatQuestionCount: 0,
+      chatSessionTimeoutMs: 20 * 60 * 1000,
+      showHistoryPanel: false,
+      historyLoading: false,
+      historySessions: [],
+      isPageActive: true,
+      showFeedbackModal: false,
+      feedbackModalConfig: {
+        title: '',
+        content: '',
+        params: {},
+        type: '',
+        targetKey: ''
+      },
       messages: [
         {
           role: 'assistant',
@@ -120,6 +209,27 @@ export default {
         '梵宫今天有演出吗',
         '推荐一条游览路线',
         '灵山大佛有什么故事'
+      ],
+      showEmojiPanel: false,
+      emojiList: [
+        { emoji: '😊', label: '开心', emotion: 'positive' },
+        { emoji: '👍', label: '点赞', emotion: 'positive' },
+        { emoji: '❤️', label: '感谢', emotion: 'positive' },
+        { emoji: '🙏', label: '祈福', emotion: 'positive' },
+        { emoji: '🎉', label: '庆祝', emotion: 'positive' },
+        { emoji: '😊', label: '微笑', emotion: 'positive' },
+        { emoji: '😁', label: '大笑', emotion: 'positive' },
+        { emoji: '🤗', label: '拥抱', emotion: 'positive' },
+        { emoji: '🤔', label: '疑惑', emotion: 'neutral' },
+        { emoji: '😲', label: '惊讶', emotion: 'surprised' },
+        { emoji: '😳', label: '害羞', emotion: 'shy' },
+        { emoji: '😭', label: '难过', emotion: 'negative' },
+        { emoji: '😢', label: '伤心', emotion: 'negative' },
+        { emoji: '😩', label: '疲惫', emotion: 'negative' },
+        { emoji: '😵‍💫', label: '晕', emotion: 'negative' },
+        { emoji: '😞', label: '失望', emotion: 'negative' },
+        { emoji: '😠', label: '生气', emotion: 'angry' },
+        { emoji: '☹️', label: '不满', emotion: 'angry' }
       ]
     }
   },
@@ -150,20 +260,68 @@ export default {
     }
   },
   onLoad(options) {
+    this.ensureChatSession()
     if (options && options.history === 'true') this.loadHistory()
     this.initRecorder()
   },
   onShow() {
+    this.isPageActive = true
     if (uni.getStorageSync('openChatHistory')) {
       uni.removeStorageSync('openChatHistory')
       this.loadHistory()
     }
   },
+  onHide() {
+    this.isPageActive = false
+    this.showFeedbackModal = false
+  },
   onUnload() {
+    this.isPageActive = false
+    uni.removeStorageSync('chatSession')
     this.cleanupH5Recording()
     this.stopCurrentSpeech(false)
+    this.showFeedbackModal = false
   },
   methods: {
+    createChatSessionId() {
+      return `chat_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+    },
+    ensureChatSession(forceNew = false) {
+      const now = Date.now()
+      const stored = uni.getStorageSync('chatSession') || {}
+      const expired = !stored.lastActiveAt || now - Number(stored.lastActiveAt) > this.chatSessionTimeoutMs
+      if (forceNew || !stored.sessionId || expired) {
+        const next = {
+          sessionId: this.createChatSessionId(),
+          lastActiveAt: now
+        }
+        uni.setStorageSync('chatSession', next)
+        this.chatSessionId = next.sessionId
+        this.chatQuestionCount = 0
+        return this.chatSessionId
+      }
+      stored.lastActiveAt = now
+      uni.setStorageSync('chatSession', stored)
+      this.chatSessionId = stored.sessionId
+      return this.chatSessionId
+    },
+    touchChatSession() {
+      const sessionId = this.chatSessionId || this.ensureChatSession()
+      uni.setStorageSync('chatSession', {
+        sessionId,
+        lastActiveAt: Date.now()
+      })
+    },
+    activateChatSession(sessionId) {
+      if (!sessionId) return this.ensureChatSession()
+      this.chatSessionId = sessionId
+      this.chatQuestionCount = 0
+      uni.setStorageSync('chatSession', {
+        sessionId,
+        lastActiveAt: Date.now()
+      })
+      return sessionId
+    },
     onDigitalReady() {
       this.digitalReady = true
     },
@@ -207,21 +365,63 @@ export default {
         this.recorder = null
       }
     },
-    async loadHistory() {
+    async loadChatSessions() {
+      try {
+        this.historyLoading = true
+        const userId = uni.getStorageSync('userId') || 'guest'
+        const sessions = await get('/chat/sessions', { user_id: userId, limit: 20 })
+        this.historySessions = Array.isArray(sessions) ? sessions : []
+      } catch (e) {
+        this.historySessions = []
+      } finally {
+        this.historyLoading = false
+      }
+    },
+    formatHistoryTime(value) {
+      if (!value) return ''
+      const date = new Date(value)
+      if (Number.isNaN(date.getTime())) return ''
+      return date.toLocaleString('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      })
+    },
+    closeHistoryPanel() {
+      this.showHistoryPanel = false
+    },
+    async loadHistory(sessionId) {
       try {
         const userId = uni.getStorageSync('userId') || 'guest'
-        const history = await get('/chat/history', { user_id: userId })
+        const activeSessionId = this.activateChatSession(sessionId || this.ensureChatSession())
+        const history = await get('/chat/history', { user_id: userId, session_id: activeSessionId })
         if (Array.isArray(history) && history.length) {
-          this.messages = history.reverse().map(item => ({
-            role: 'user',
-            text: item.content || ''
-          }))
+          const nextMessages = []
+          history.reverse().forEach((item) => {
+            if (item.content) {
+              nextMessages.push({ role: 'user', text: item.content })
+            }
+            if (item.reply_text) {
+              nextMessages.push({ role: 'assistant', text: item.reply_text })
+            }
+          })
+          this.messages = nextMessages.length ? nextMessages : this.messages
+          this.scrollToBottom()
+          this.activateChatSession(activeSessionId)
         }
       } catch (e) {}
     },
     async openHistory() {
-      await this.loadHistory()
-      uni.showToast({ title: '已加载对话历史', icon: 'none' })
+      this.showHistoryPanel = true
+      await this.loadChatSessions()
+    },
+    async selectHistorySession(session) {
+      if (!session || !session.session_id) return
+      this.stopCurrentSpeech()
+      await this.loadHistory(session.session_id)
+      this.showHistoryPanel = false
+      uni.showToast({ title: '已切换到历史会话', icon: 'none' })
     },
     async startVoice(event) {
       if (event && typeof event.preventDefault === 'function') {
@@ -429,31 +629,129 @@ export default {
     askQuick(text) {
       this.askQuestion(text)
     },
+    serviceActionLabel(action = {}) {
+      const actionType = action.action_type || 'navigate_to'
+      if (actionType !== 'open_location') return action.name || ''
+      return '开始导航'
+    },
+    async navigateToService(action) {
+      const actionType = action.action_type || 'navigate_to'
+
+      if (actionType === 'open_location') {
+        const payload = action.payload || {}
+        const latitude = Number(payload.latitude)
+        const longitude = Number(payload.longitude)
+        if (!latitude || !longitude) {
+          uni.showToast({ title: '暂无可导航位置', icon: 'none' })
+          return
+        }
+        uni.openLocation({
+          latitude,
+          longitude,
+          name: payload.name || action.name || '目的地',
+          address: payload.address || ''
+        })
+        return
+      }
+
+      if (actionType === 'request_location') {
+        const location = await this.resolveCurrentLocation(true)
+        if (location) {
+          await this.askQuestion('我在当前位置附近', {
+            location,
+            displayText: '已获取当前位置，请继续查询附近设施'
+          })
+        }
+        return
+      }
+
+      if (!action.path) return
+      let url = action.path
+      if (action.params && Object.keys(action.params).length > 0) {
+        const params = new URLSearchParams(action.params).toString()
+        url = `${url}?${params}`
+      }
+
+      if (actionType === 'switch_tab') {
+        uni.switchTab({ url: action.path })
+        return
+      }
+      uni.navigateTo({ url })
+    },
+    toggleEmojiPanel() {
+      this.showEmojiPanel = !this.showEmojiPanel
+    },
+    selectEmoji(item) {
+      this.inputText += item.emoji
+      this.showEmojiPanel = false
+    },
     sendText() {
       const text = this.inputText.trim()
       if (!text) return
       this.inputText = ''
+      this.showEmojiPanel = false
       this.askQuestion(text)
     },
-    async askQuestion(text) {
+    shouldAttachLocation(text) {
+      return ['附近', '周围', '旁边', '最近', '迷路', '怎么走', '导航', '带我去', '我想去', '想去', '前往', '天气好热', '避暑', '走不动', '休息', '吃饭', '餐厅', '厕所'].some(word => text.includes(word))
+    },
+    notifyLocationFeedback(location) {
+      if (!location) return
+      const label = location.isFallback ? '默认起点' : location.isCached ? '上次位置' : '当前位置'
+      uni.showToast({ title: `已获取${label}`, icon: 'none' })
+    },
+    async resolveCurrentLocation(showFeedback = false) {
+      try {
+        const location = await requestCurrentLocation({ allowCache: true, allowFallback: false })
+        if (showFeedback) {
+          this.notifyLocationFeedback(location)
+        }
+        return location
+      } catch (error) {
+        if (showFeedback) {
+          uni.showToast({ title: getLocationErrorMessage(error), icon: 'none' })
+        }
+        return null
+      }
+    },
+    getCurrentLocationForChat(text) {
+      if (!this.shouldAttachLocation(text)) return Promise.resolve({})
+      return this.resolveCurrentLocation(false).then((location) => {
+        if (!location) return {}
+        this.notifyLocationFeedback(location)
+        return {
+          latitude: location.latitude,
+          longitude: location.longitude
+        }
+      })
+    },
+    async askQuestion(text, options = {}) {
       const replySeq = this.activeReplySeq + 1
       this.activeReplySeq = replySeq
       this.stopCurrentSpeech()
 
       const userId = uni.getStorageSync('userId') || 'guest'
-      this.messages.push({ role: 'user', text })
+      const sessionId = this.ensureChatSession()
+      this.messages.push({ role: 'user', text: options.displayText || text })
       this.scrollToBottom()
       this.status = 'think'
       this.emotion = 'neutral'
 
       try {
-        const res = await post('/chat', { text, user_id: userId })
+        const locationPayload = options.location ? {
+          latitude: options.location.latitude,
+          longitude: options.location.longitude
+        } : await this.getCurrentLocationForChat(text)
+        this.touchChatSession()
+        const res = await post('/chat', { text, user_id: userId, session_id: sessionId, ...locationPayload })
         if (replySeq !== this.activeReplySeq) return
         
         const answer = res.text || res.response || res.answer || '抱歉，我暂时没有检索到合适的讲解。'
         const speechText = res.speech_text || answer
         const replyId = res.reply_id || String(replySeq)
         const userEmotion = res.emotion || this.emotion
+        const serviceActions = res.service_actions || []
+        const debugInfo = res.debug_info || {}
 
         const emotionExpression = this.getExpressionForEmotion(userEmotion)
 
@@ -462,7 +760,7 @@ export default {
           expression: res.digital_human_expression || emotionExpression
         }
 
-        this.messages.push({ role: 'assistant', text: answer })
+        this.messages.push({ role: 'assistant', text: answer, service_actions: serviceActions, debug_info: debugInfo })
         this.emotion = userEmotion
         this.status = 'speak'
         this.scrollToBottom()
@@ -474,12 +772,74 @@ export default {
             speaking: false
           })
         }
-        this.trySpeak(speechText, replySeq, replyId)
+        await this.trySpeak(speechText, replySeq, replyId)
+        this.chatQuestionCount += 1
+        this.maybePromptChatFeedback(sessionId)
       } catch (e) {
         if (replySeq !== this.activeReplySeq) return
         this.messages.push({ role: 'assistant', text: '当前网络不稳定，您可以稍后再问我。' })
         this.status = 'idle'
         this.scrollToBottom()
+      }
+    },
+    /*
+    maybePromptChatFeedback(sessionId) {
+      if (this.chatQuestionCount < 3) return
+      const targetKey = sessionId || this.chatSessionId
+      promptForFeedback({
+        type: 'chat',
+        targetKey,
+        title: '评价',
+        content: '你已经和数字人连续交流了几轮，愿意花几秒钟评价这次问答体验吗？',
+        params: {
+          feedback_type: 'chat',
+          target_type: 'chat',
+          target_id: targetKey,
+          target_name: 'AI 对话',
+          source: 'chat',
+          session_id: targetKey
+        }
+      })
+    },
+    */
+    async maybePromptChatFeedback(sessionId) {
+      if (!this.isPageActive) return
+      if (this.chatQuestionCount < 3) return
+      const targetKey = sessionId || this.chatSessionId
+      const result = await promptForFeedback({
+        type: 'chat',
+        targetKey,
+        title: '评价',
+        content: '你已经和数字人连续交流了几轮，愿意花几秒钟评价这次问答体验吗？',
+        params: {
+          feedback_type: 'chat',
+          target_type: 'chat',
+          target_id: targetKey,
+          target_name: 'AI 对话',
+          source: 'chat',
+          session_id: targetKey
+        },
+        useCustomModal: true
+      })
+      if (result && result.shouldShow) {
+        this.feedbackModalConfig = {
+          title: result.title,
+          content: result.content,
+          params: result.params,
+          type: result.type,
+          targetKey: result.targetKey
+        }
+        this.showFeedbackModal = true
+      }
+    },
+    handleFeedbackLater() {
+      if (this.feedbackModalConfig.type && this.feedbackModalConfig.targetKey) {
+        markFeedbackPrompt(this.feedbackModalConfig.type, this.feedbackModalConfig.targetKey, 'dismissed')
+      }
+    },
+    handleFeedbackSubmit() {
+      if (this.feedbackModalConfig.params) {
+        openFeedbackPage(this.feedbackModalConfig.params)
       }
     },
     getExpressionForEmotion(emotion) {
@@ -506,27 +866,144 @@ export default {
         this.$refs.digitalHuman.stopSpeaking()
       }
     },
+    splitSpeechText(text, maxLen = 220) {
+      const normalized = String(text || '').replace(/\s+/g, ' ').trim()
+      if (!normalized) return []
+
+      const rawParts = normalized.split(/([。！？!?；;])/)
+      const sentences = []
+      for (let i = 0; i < rawParts.length; i += 2) {
+        const left = rawParts[i] || ''
+        const right = rawParts[i + 1] || ''
+        const sentence = `${left}${right}`.trim()
+        if (sentence) sentences.push(sentence)
+      }
+      const chunks = []
+      let buffer = ''
+      const softBreakChars = ['，', ',', '、', '；', ';']
+
+      const pushBuffer = () => {
+        const trimmed = buffer.trim()
+        if (trimmed) chunks.push(trimmed)
+        buffer = ''
+      }
+
+      const pushLongSentence = (sentence) => {
+        let rest = sentence.trim()
+        while (rest.length > maxLen) {
+          let cutIndex = -1
+          for (const ch of softBreakChars) {
+            const idx = rest.lastIndexOf(ch, maxLen)
+            if (idx > cutIndex) cutIndex = idx
+          }
+          if (cutIndex < Math.floor(maxLen * 0.5)) {
+            cutIndex = maxLen
+          } else {
+            cutIndex += 1
+          }
+          chunks.push(rest.slice(0, cutIndex).trim())
+          rest = rest.slice(cutIndex).trim()
+        }
+        if (rest) buffer = rest
+      }
+
+      for (const sentence of sentences) {
+        if (!sentence) continue
+        if ((buffer + sentence).length <= maxLen) {
+          buffer += sentence
+          continue
+        }
+
+        pushBuffer()
+
+        if (sentence.length <= maxLen) {
+          buffer = sentence
+          continue
+        }
+
+        pushLongSentence(sentence)
+      }
+
+      pushBuffer()
+      return chunks.length ? chunks : [normalized]
+    },
+    playSpeechAudio(audioData, replySeq) {
+      return new Promise((resolve) => {
+        if (!audioData || replySeq !== this.activeReplySeq) {
+          resolve(false)
+          return
+        }
+
+        this.audioElement = new Audio(audioData)
+        this.audioElement.onplay = () => {
+          if (replySeq !== this.activeReplySeq) return
+          if (this.$refs.digitalHuman) {
+            this.$refs.digitalHuman.startRealLipSync(this.audioElement)
+          }
+        }
+        this.audioElement.onended = () => {
+          if (this.audioElement) {
+            this.audioElement.onplay = null
+            this.audioElement.onended = null
+            this.audioElement.onerror = null
+            this.audioElement = null
+          }
+          resolve(true)
+        }
+        this.audioElement.onerror = () => {
+          if (this.audioElement) {
+            this.audioElement.onplay = null
+            this.audioElement.onended = null
+            this.audioElement.onerror = null
+            this.audioElement = null
+          }
+          resolve(false)
+        }
+
+        this.audioElement.play().catch(() => {
+          if (this.audioElement) {
+            this.audioElement.onplay = null
+            this.audioElement.onended = null
+            this.audioElement.onerror = null
+            this.audioElement = null
+          }
+          resolve(false)
+        })
+      })
+    },
     async trySpeak(text, replySeq = this.activeReplySeq, replyId = String(replySeq)) {
       try {
+        const speechChunks = this.splitSpeechText(text)
+        if (speechChunks.length > 1) {
+          this.stopCurrentSpeech(false)
+          for (let i = 0; i < speechChunks.length; i++) {
+            if (replySeq !== this.activeReplySeq) return
+            const audio = await post('/ai/tts', {
+              text: speechChunks[i],
+              voice: 'female',
+              reply_id: `${replyId}_${i + 1}`
+            })
+            if (replySeq !== this.activeReplySeq) return
+            if (!audio || !audio.audio_data) {
+              continue
+            }
+            const played = await this.playSpeechAudio(audio.audio_data, replySeq)
+            if (!played) return
+          }
+          this.finishSpeaking(replySeq)
+          return
+        }
+
         const audio = await post('/ai/tts', { text, voice: 'female', reply_id: replyId })
         if (replySeq !== this.activeReplySeq) return
 
         if (audio && audio.audio_data) {
           this.stopCurrentSpeech(false)
-          
-          this.audioElement = new Audio(audio.audio_data)
-          
-          this.audioElement.onplay = () => {
-            if (replySeq !== this.activeReplySeq) return
-            if (this.$refs.digitalHuman) {
-              this.$refs.digitalHuman.startRealLipSync(this.audioElement)
-            }
+          const played = await this.playSpeechAudio(audio.audio_data, replySeq)
+          if (played) {
+            this.finishSpeaking(replySeq)
+            return
           }
-          this.audioElement.onended = () => this.finishSpeaking(replySeq)
-          this.audioElement.onerror = () => this.finishSpeaking(replySeq)
-          
-          await this.audioElement.play()
-          return
         }
       } catch (e) {}
 
@@ -561,6 +1038,8 @@ export default {
 .digital-page {
   position: relative;
   min-height: 100vh;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   background:
     radial-gradient(circle at 50% 28%, rgba(231, 190, 104, 0.32), transparent 22%),
@@ -633,7 +1112,9 @@ export default {
 .stage {
   position: relative;
   z-index: 2;
-  height: 700rpx;
+  flex: 0 0 40vh;
+  min-height: 360rpx;
+  max-height: 520rpx;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -674,10 +1155,16 @@ export default {
   border-radius: 12rpx;
   background: rgba(255, 248, 232, 0.9);
   color: #37251a;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
 }
 
 .message-scroll {
-  height: 290rpx;
+  flex: 1;
+  min-height: 0;
+  height: auto;
 }
 
 .message {
@@ -710,12 +1197,43 @@ export default {
   line-height: 1.55;
 }
 
+.service-actions {
+  display: flex;
+  gap: 12rpx;
+  margin-top: 12rpx;
+  flex-wrap: wrap;
+}
+
+.service-action-item {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+  padding: 8rpx 16rpx;
+  border-radius: 999rpx;
+  background: rgba(140, 50, 40, 0.15);
+  border: 1rpx solid rgba(140, 50, 40, 0.3);
+}
+
+.service-action-item:active {
+  background: rgba(140, 50, 40, 0.25);
+}
+
+.service-action-icon {
+  font-size: 24rpx;
+}
+
+.service-action-name {
+  font-size: 22rpx;
+  color: #8c3228;
+}
+
 .quick-row {
   display: flex;
   gap: 12rpx;
   overflow-x: auto;
   padding: 12rpx 0;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .quick-chip {
@@ -730,8 +1248,129 @@ export default {
 
 .input-row {
   display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+  flex-shrink: 0;
+}
+
+.history-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(0, 0, 0, 0.38);
+}
+
+.history-sheet {
+  width: 100%;
+  max-height: 70vh;
+  padding: 24rpx;
+  border-radius: 18rpx 18rpx 0 0;
+  background: #fff8e8;
+  color: #37251a;
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16rpx;
+}
+
+.history-title-main {
+  font-size: 30rpx;
+  font-weight: 800;
+}
+
+.history-close {
+  width: 52rpx;
+  height: 52rpx;
+  padding: 0;
+  border-radius: 50%;
+  background: #f0dfbd;
+  color: #6d4b2d;
+  font-size: 34rpx;
+  line-height: 52rpx;
+}
+
+.history-list {
+  max-height: 58vh;
+}
+
+.history-empty {
+  padding: 48rpx 0;
+  text-align: center;
+  color: #8b7357;
+  font-size: 26rpx;
+}
+
+.history-session {
+  padding: 18rpx;
+  margin-bottom: 14rpx;
+  border: 1rpx solid rgba(140, 50, 40, 0.12);
+  border-radius: 10rpx;
+  background: #f3e3c4;
+}
+
+.history-session.active {
+  border-color: rgba(140, 50, 40, 0.45);
+  background: #efd8ad;
+}
+
+.history-session-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16rpx;
+}
+
+.history-session-title {
+  flex: 1;
+  font-size: 28rpx;
+  font-weight: 700;
+  color: #37251a;
+}
+
+.history-session-time {
+  flex-shrink: 0;
+  color: #8b7357;
+  font-size: 22rpx;
+}
+
+.history-session-preview {
+  display: block;
+  margin-top: 8rpx;
+  color: #6d4b2d;
+  font-size: 24rpx;
+  line-height: 1.45;
+}
+
+.history-session-count {
+  display: block;
+  margin-top: 8rpx;
+  color: #9a7b54;
+  font-size: 22rpx;
+}
+
+.input-tools {
+  display: flex;
   align-items: center;
   gap: 12rpx;
+}
+
+.emoji-trigger {
+  width: 72rpx;
+  height: 72rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8rpx;
+  background: #fffaf0;
+}
+
+.emoji-icon {
+  font-size: 36rpx;
 }
 
 .text-input {
@@ -810,6 +1449,42 @@ export default {
   40% {
     transform: scale(1);
   }
+}
+
+.emoji-panel {
+  padding: 16rpx;
+  border-radius: 10rpx;
+  background: #fffaf0;
+}
+
+.emoji-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16rpx;
+}
+
+.emoji-item {
+  width: 88rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6rpx;
+  padding: 10rpx;
+  border-radius: 8rpx;
+  background: #f3e3c4;
+}
+
+.emoji-item:active {
+  background: #e8d4a8;
+}
+
+.emoji-char {
+  font-size: 36rpx;
+}
+
+.emoji-label {
+  font-size: 20rpx;
+  color: #6d4b2d;
 }
 
 .voice-control {

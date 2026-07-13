@@ -3,7 +3,7 @@
     <view v-if="!spotDetail && !isLoading" class="spot-picker">
       <view class="picker-head">
         <text class="picker-title">景点讲解</text>
-        <text class="picker-subtitle">择一处胜景，听一段缘起</text>
+        <text class="picker-subtitle">选一个景点，开始听讲解</text>
       </view>
       <view
         class="picker-row"
@@ -21,7 +21,7 @@
       </view>
     </view>
 
-    <view v-if="spotDetail" class="detail">
+    <view v-else-if="spotDetail" class="detail">
       <view class="cover" :class="'cover-tone-' + (spotDetail.id % 4)">
         <view class="cover-shade"></view>
         <view class="cover-note">
@@ -29,10 +29,37 @@
           <text class="cover-title">{{ spotName }}</text>
           <text class="cover-subtitle">{{ shortDescription }}</text>
         </view>
-        <view class="panorama-tip">AR / VR 全景导览预留</view>
+
       </view>
 
       <view class="content">
+        <view class="audio-card">
+          <view class="audio-head">
+            <view>
+              <text class="audio-title">语音讲解</text>
+            </view>
+            <text class="audio-time">{{ formatTime(currentTime) }} / {{ formatTime(duration) }}</text>
+          </view>
+          <view class="audio-control-row">
+            <slider
+              class="audio-slider"
+              :disabled="!canPlayAudio || duration <= 0"
+              :value="playbackPercent"
+              min="0"
+              max="100"
+              block-size="16"
+              activeColor="#8c3228"
+              backgroundColor="rgba(140, 50, 40, 0.16)"
+              @change="seekAudio"
+            />
+            <button v-if="canPlayAudio" class="audio-toggle" @click="toggleGuidePlayback">
+              {{ isPlaying ? '暂停' : '播放' }}
+            </button>
+            <text v-else class="audio-empty-note">!</text>
+          </view>
+          <text v-if="audioHint" class="audio-subtitle">{{ audioHint }}</text>
+        </view>
+
         <view class="intro-block">
           <view class="title-row">
             <text class="block-title">{{ spotName }}</text>
@@ -54,20 +81,9 @@
         </view>
 
         <view class="section-card">
-          <text class="section-title">打卡点与游览亮点</text>
+          <text class="section-title">打卡亮点</text>
           <view class="highlight-list">
             <text class="highlight-item" v-for="item in highlights" :key="item">{{ item }}</text>
-          </view>
-        </view>
-
-        <view class="section-card" v-if="performances.length">
-          <view class="title-row">
-            <text class="section-title">演出日程</text>
-            <text class="next-show">最近 {{ performances[0].time }}</text>
-          </view>
-          <view class="show-row" v-for="show in performances" :key="show.time + show.name">
-            <text class="show-time">{{ show.time }}</text>
-            <text class="show-name">{{ show.name }}</text>
           </view>
         </view>
 
@@ -86,53 +102,105 @@
 
         <view class="section-card">
           <text class="section-title">周边信息</text>
-          <view class="nearby-row" v-for="item in nearbyItems" :key="item.name" @click="openNearby(item)">
-            <view>
+          <view class="nearby-row" v-for="item in nearbyItems" :key="item.type + item.id" @click="openNearby(item)">
+            <view class="nearby-main">
               <text class="nearby-name">{{ item.name }}</text>
               <text class="nearby-desc">{{ item.desc }}</text>
             </view>
-            <text class="nearby-action">{{ item.type === 'spot' ? '详情' : '导航' }}</text>
+            <text class="nearby-action">{{ item.action }}</text>
           </view>
         </view>
 
-        <view class="section-card">
-          <text class="section-title">游客评价</text>
-          <view class="review-row" v-for="review in reviews" :key="review.name">
-            <text class="review-name">{{ review.name }}</text>
-            <text class="review-text">{{ review.text }}</text>
-          </view>
-        </view>
+      </view>
+
+      <view class="floating-human" v-if="showDigitalHuman">
+        <DigitalHuman
+          ref="digitalHuman"
+          class="human-frame"
+          :compact="true"
+          :status="humanStatus"
+          :emotion="humanEmotion"
+          @ready="onDigitalReady"
+          @error="onDigitalError"
+        />
       </view>
     </view>
 
     <view class="loading" v-if="isLoading">
-      <text>正在展开景点卷轴...</text>
+      <text>正在展开景点详情...</text>
     </view>
+
+    <FeedbackModal
+      :visible="showFeedbackModal"
+      :title="feedbackModalConfig.title"
+      :content="feedbackModalConfig.content"
+      :params="feedbackModalConfig.params"
+      :type="feedbackModalConfig.type"
+      :target-key="feedbackModalConfig.targetKey"
+      @close="showFeedbackModal = false"
+      @later="handleFeedbackLater"
+      @submit="handleFeedbackSubmit"
+    />
   </view>
 </template>
 
 <script>
+import DigitalHuman from '@/components/digital-human-simple/index.vue'
+import FeedbackModal from '@/components/FeedbackModal/index.vue'
 import { get, post } from '@/utils/request'
+import { promptForFeedback, markFeedbackPrompt, openFeedbackPage } from '@/utils/feedback'
+
+const GUIDE_FEEDBACK_DWELL_MS = 60 * 1000
 
 const fallbackSpots = [
   { id: 1, spot_name: '灵山大佛', description: '太湖之滨的祈福地标。' },
   { id: 2, spot_name: '灵山梵宫', description: '集建筑、壁画、演艺于一体的佛教艺术殿堂。' },
   { id: 3, spot_name: '九龙灌浴', description: '以佛陀诞生为主题的动态景观。' },
-  { id: 4, spot_name: '五印坛城', description: '藏传佛教文化体验空间。' }
+  { id: 4, spot_name: '五印坛城', description: '藏传佛教风格的文化体验空间。' }
 ]
 
+const fallbackGuide = {
+  content: '这里是灵山胜境的重要景点，适合放慢脚步慢慢感受。',
+  culture: '这里融合了佛教文化、建筑艺术和景观表达，形成了独特的游览体验。',
+  highlights: '建筑细节、文化内涵、拍照视角',
+  open_info: '请以景区当日公告为准。'
+}
+
 export default {
+  components: {
+    DigitalHuman,
+    FeedbackModal
+  },
   data() {
     return {
       spotId: null,
       spotDetail: null,
       guideContent: null,
+      guideAsset: null,
+      audioElement: null,
+      audioUrl: '',
       spots: fallbackSpots,
       nearbyData: null,
       popularityData: null,
       isLoading: false,
       startTime: 0,
-      behaviorId: null
+      guideFeedbackTimer: null,
+      behaviorId: null,
+      audioReady: false,
+      isPlaying: false,
+      currentTime: 0,
+      duration: 0,
+      playbackPercent: 0,
+      digitalReady: false,
+      isPageActive: true,
+      showFeedbackModal: false,
+      feedbackModalConfig: {
+        title: '',
+        content: '',
+        params: {},
+        type: '',
+        targetKey: ''
+      }
     }
   },
   computed: {
@@ -140,22 +208,25 @@ export default {
       return this.spotDetail?.spot_name || this.spotDetail?.name || '灵山景点'
     },
     shortDescription() {
-      const text = this.spotDetail?.description || '灵山胜境代表性景点。'
-      return text.length > 42 ? text.slice(0, 42) + '...' : text
+      const text = this.spotDetail?.description || fallbackGuide.content
+      return text.length > 48 ? `${text.slice(0, 48)}...` : text
     },
     guideText() {
-      return this.guideContent?.content || this.spotDetail?.description || '这里有深厚的文化底蕴，适合停下脚步慢慢游览。'
+      return this.guideContent?.content || this.spotDetail?.description || fallbackGuide.content
     },
     cultureText() {
-      return this.guideContent?.culture || this.spotDetail?.culture_connotation || '该景点承载了灵山胜境的文化叙事，将建筑、礼佛、山水与游览体验融合在一起。'
+      return this.guideContent?.culture || this.spotDetail?.culture_connotation || fallbackGuide.culture
     },
     highlights() {
-      const raw = this.guideContent?.highlights || this.spotDetail?.highlights
-      if (raw) return String(raw).split(/[、,，；;]/).filter(Boolean).slice(0, 5)
-      return ['代表性视角拍照', '听取文化讲解', '参与祈福体验', '留意建筑细节']
+      const raw = this.guideContent?.highlights || this.spotDetail?.highlights || fallbackGuide.highlights
+      return String(raw)
+        .split(/[，,；;。/、\n]+/)
+        .map(item => item.trim())
+        .filter(Boolean)
+        .slice(0, 5)
     },
     crowdLevel() {
-      if (this.popularityData) {
+      if (this.popularityData?.popularity_level) {
         return `热度 ${this.popularityData.popularity_level}`
       }
       const levels = ['舒适', '适中', '热门']
@@ -164,69 +235,53 @@ export default {
     keyInfo() {
       const popularity = this.popularityData?.popularity_level || '适中'
       return [
-        { label: '开放', value: this.spotDetail?.open_info || '以景区当日公告为准' },
+        { label: '开放', value: this.spotDetail?.open_info || fallbackGuide.open_info },
         { label: '建议停留', value: this.spotName.includes('梵宫') ? '45-70分钟' : '25-45分钟' },
-        { label: '适合', value: this.spotName.includes('九龙') ? '亲子 / 表演' : '祈福 / 拍照' },
+        { label: '适合', value: this.spotName.includes('九龙') ? '亲子 / 演出' : '祈福 / 拍照' },
         { label: '热度', value: popularity }
       ]
     },
-    performances() {
-      if (this.spotName.includes('梵宫')) {
-        return [
-          { time: '09:30', name: '吉祥颂上午场' },
-          { time: '14:00', name: '吉祥颂下午场' }
-        ]
-      }
-      if (this.spotName.includes('九龙')) {
-        return [
-          { time: '10:00', name: '九龙灌浴' },
-          { time: '15:00', name: '九龙灌浴' }
-        ]
-      }
-      return []
-    },
     nearbyItems() {
-      if (!this.nearbyData) {
-        return []
-      }
       const items = []
-      this.nearbyData.nearby_spots?.forEach(spot => {
-        items.push({
-          type: 'spot',
-          id: spot.id,
-          name: spot.name,
-          desc: spot.distance_text + ' · ' + spot.desc,
-          latitude: spot.latitude,
-          longitude: spot.longitude
+      const pushGroup = (list = [], type, action) => {
+        list.forEach(item => {
+          items.push({
+            type,
+            id: item.id,
+            name: item.name,
+            desc: `${item.distance_text || item.walk_time || ''}${item.desc ? ` · ${item.desc}` : ''}`.trim(),
+            latitude: item.latitude,
+            longitude: item.longitude,
+            action
+          })
         })
-      })
-      this.nearbyData.food?.forEach(food => {
-        items.push({
-          type: 'food',
-          id: food.id,
-          name: food.name,
-          desc: food.distance_text + ' · ' + food.desc,
-          latitude: food.latitude,
-          longitude: food.longitude
-        })
-      })
-      this.nearbyData.hotel?.forEach(hotel => {
-        items.push({
-          type: 'hotel',
-          id: hotel.id,
-          name: hotel.name,
-          desc: hotel.distance_text + ' · ' + hotel.desc,
-          latitude: hotel.latitude,
-          longitude: hotel.longitude
-        })
-      })
-      return items.slice(0, 5)
+      }
+
+      if (this.nearbyData) {
+        pushGroup(this.nearbyData.nearby_spots, 'spot', '详情')
+        pushGroup(this.nearbyData.food, 'food', '导航')
+        pushGroup(this.nearbyData.hotel, 'hotel', '导航')
+        pushGroup(this.nearbyData.services, 'service', '导航')
+      }
+
+      return items.slice(0, 6)
     },
-    reviews() {
-      return [
-        { name: '游客甲', text: '讲解内容很清楚，适合第一次来灵山的人。' },
-        { name: '游客乙', text: '下午光线很好，拍照和慢游都很舒服。' }
-      ]
+    
+    audioHint() {
+      if (!this.canPlayAudio) return '讲解音频暂未生成'
+      return this.isPlaying ? '正在播放中' : '点击播放即可开始'
+    },
+    canPlayAudio() {
+      return Boolean(this.audioUrl)
+    },
+    humanStatus() {
+      return this.isPlaying ? 'speak' : 'idle'
+    },
+    humanEmotion() {
+      return 'neutral'
+    },
+    showDigitalHuman() {
+      return Boolean(this.spotDetail)
     }
   },
   onLoad(options) {
@@ -238,11 +293,21 @@ export default {
     }
   },
   onShow() {
+    this.isPageActive = true
     if (this.spotId && !this.behaviorId && this.spotDetail) {
       this.recordViewBehavior()
     }
+    this.scheduleGuideFeedbackPrompt()
+  },
+  onHide() {
+    this.isPageActive = false
+    this.clearGuideFeedbackTimer()
+    this.dismissFeedbackModal()
   },
   onUnload() {
+    this.isPageActive = false
+    this.clearGuideFeedbackTimer()
+    this.dismissFeedbackModal()
     if (this.spotId && this.spotDetail) {
       const duration = Math.floor((Date.now() - this.startTime) / 1000)
       if (this.behaviorId) {
@@ -251,26 +316,109 @@ export default {
         this.recordViewBehavior(duration)
       }
     }
+    this.destroyAudio()
   },
   methods: {
+    onDigitalReady() {
+      this.digitalReady = true
+      if (this.isPlaying && this.audioElement && this.$refs.digitalHuman) {
+        this.$refs.digitalHuman.startRealLipSync(this.audioElement)
+      }
+    },
+    onDigitalError(error) {
+      this.digitalReady = false
+      const message = error && error.message ? error.message : '数字人加载失败'
+      uni.showToast({ title: message, icon: 'none' })
+    },
     recordViewBehavior(duration = null) {
       const data = {
         behavior_type: 'view',
         spot_id: this.spotId,
         spot_name: this.spotDetail.spot_name || this.spotDetail.name,
-        duration: duration
+        duration
       }
-      post('/behavior', data)
-        .then(res => {
-          if (res.id) this.behaviorId = res.id
-        })
-        .catch(() => {})
+      post('/behavior', data).then(res => {
+        if (res.id) this.behaviorId = res.id
+      }).catch(() => {})
     },
     updateBehaviorDuration(duration) {
-      post(`/behavior/${this.behaviorId}/duration?duration=${duration}`)
-        .catch(() => {
-          this.recordViewBehavior(duration)
-        })
+      post(`/behavior/${this.behaviorId}/duration?duration=${duration}`).catch(() => {
+        this.recordViewBehavior(duration)
+      })
+    },
+    clearGuideFeedbackTimer() {
+      if (!this.guideFeedbackTimer) return
+      clearTimeout(this.guideFeedbackTimer)
+      this.guideFeedbackTimer = null
+    },
+    scheduleGuideFeedbackPrompt() {
+      this.clearGuideFeedbackTimer()
+      if (!this.spotId || !this.spotDetail) return
+      const elapsed = Date.now() - this.startTime
+      const remaining = Math.max(GUIDE_FEEDBACK_DWELL_MS - elapsed, 0)
+      this.guideFeedbackTimer = setTimeout(() => {
+        this.guideFeedbackTimer = null
+        this.maybePromptGuideFeedback()
+      }, remaining)
+    },
+    /*
+    maybePromptGuideFeedback() {
+      if (!this.spotId || !this.spotDetail) return
+      promptForFeedback({
+        type: 'guide',
+        targetKey: this.spotId,
+        title: '评价',
+        content: `你已经在「${this.spotName}」停留了一会儿，愿意评价这次讲解体验吗？`,
+        params: {
+          feedback_type: 'guide',
+          target_type: 'spot',
+          target_id: this.spotId,
+          target_name: this.spotName,
+          source: 'guide'
+        }
+      })
+    },
+    */
+    async maybePromptGuideFeedback() {
+      if (!this.isPageActive) return
+      if (!this.spotId || !this.spotDetail) return
+      const result = await promptForFeedback({
+        type: 'guide',
+        targetKey: this.spotId,
+        title: '评价',
+        content: `你已经在「${this.spotName}」停留了一会儿，愿意评价这次讲解体验吗？`,
+        params: {
+          feedback_type: 'guide',
+          target_type: 'spot',
+          target_id: this.spotId,
+          target_name: this.spotName,
+          source: 'guide'
+        },
+        useCustomModal: true
+      })
+      if (result && result.shouldShow) {
+        this.feedbackModalConfig = {
+          title: result.title,
+          content: result.content,
+          params: result.params,
+          type: result.type,
+          targetKey: result.targetKey
+        }
+        this.showFeedbackModal = true
+      }
+    },
+    handleFeedbackLater() {
+      if (this.feedbackModalConfig.type && this.feedbackModalConfig.targetKey) {
+        markFeedbackPrompt(this.feedbackModalConfig.type, this.feedbackModalConfig.targetKey, 'dismissed')
+      }
+    },
+    handleFeedbackSubmit() {
+      if (this.feedbackModalConfig.params) {
+        openFeedbackPage(this.feedbackModalConfig.params)
+      }
+    },
+    dismissFeedbackModal() {
+      this.showFeedbackModal = false
     },
     async loadSpotsList() {
       try {
@@ -282,35 +430,173 @@ export default {
     },
     async loadSpot(id) {
       this.isLoading = true
+      this.startTime = Date.now()
+      this.clearGuideFeedbackTimer()
       this.spotId = id
+      this.spotDetail = null
       this.nearbyData = null
       this.popularityData = null
+      this.guideContent = null
+      this.guideAsset = null
+      this.audioUrl = ''
+      this.destroyAudio()
+      this.behaviorId = null
+
       if (!this.spots.length) await this.loadSpotsList()
 
       try {
-        const [spot, guide, nearby, popularity] = await Promise.all([
-          get(`/spots/${id}`),
+        const spot = await get(`/spots/${id}`)
+        this.spotDetail = spot
+        const [guideResult, nearbyResult, popularityResult] = await Promise.allSettled([
           get(`/guide/${id}`),
           get(`/spots/${id}/nearby`),
           get(`/spots/${id}/popularity`)
         ])
-        this.spotDetail = spot
-        this.guideContent = guide
-        this.nearbyData = nearby
-        this.popularityData = popularity
-      } catch (e) {
-        const fallback = fallbackSpots.find(item => item.id === id) || fallbackSpots[0]
-        this.spotDetail = fallback
-        this.guideContent = {
-          content: fallback.description,
-          culture: '这里是灵山胜境的重要游览节点，适合结合智能导览了解历史、礼仪与建筑细节。'
+
+        if (guideResult.status === 'fulfilled') {
+          const guide = guideResult.value
+          this.guideContent = guide || null
+          this.guideAsset = guide?.guide_asset || null
+          this.audioUrl = guide?.audio_url || guide?.guide_asset?.audio_url || ''
+          console.log('[AUDIO DEBUG] guide data:', JSON.stringify({ audio_url: guide?.audio_url, guide_asset_audio_url: guide?.guide_asset?.audio_url }, null, 2))
+          console.log('[AUDIO DEBUG] final audioUrl:', this.audioUrl)
+          this.prepareAudio()
+        } else {
+          this.guideContent = null
+          this.guideAsset = null
+          this.audioUrl = ''
         }
+
+        this.nearbyData = nearbyResult.status === 'fulfilled' ? nearbyResult.value : null
+        this.popularityData = popularityResult.status === 'fulfilled' ? popularityResult.value : null
+      } catch (e) {
+        this.spotDetail = null
+        uni.showToast({ title: '景点详情加载失败', icon: 'none' })
       } finally {
         this.isLoading = false
         if (!this.behaviorId && this.spotDetail) {
           this.recordViewBehavior()
         }
+        this.scheduleGuideFeedbackPrompt()
       }
+    },
+    prepareAudio() {
+      this.currentTime = 0
+      this.duration = 0
+      this.playbackPercent = 0
+      this.isPlaying = false
+      if (!this.audioUrl) {
+        console.log('[AUDIO DEBUG] prepareAudio: audioUrl is empty')
+        return
+      }
+
+      console.log('[AUDIO DEBUG] Creating Audio element with URL:', this.audioUrl)
+      this.audioElement = new Audio(this.audioUrl)
+      this.audioElement.preload = 'auto'
+      this.audioElement.onloadedmetadata = () => {
+        this.duration = Number.isFinite(this.audioElement.duration) ? this.audioElement.duration : 0
+        console.log('[AUDIO DEBUG] onloadedmetadata: duration =', this.duration)
+      }
+      this.audioElement.ontimeupdate = () => {
+        if (!this.audioElement) return
+        this.currentTime = this.audioElement.currentTime || 0
+        this.duration = Number.isFinite(this.audioElement.duration) ? this.audioElement.duration : this.duration
+        this.playbackPercent = this.duration > 0 ? Math.min(100, Math.max(0, Math.round((this.currentTime / this.duration) * 100))) : 0
+      }
+      this.audioElement.onplay = () => {
+        this.isPlaying = true
+        if (this.$refs.digitalHuman && this.digitalReady) {
+          this.$refs.digitalHuman.startRealLipSync(this.audioElement)
+        }
+      }
+      this.audioElement.onpause = () => {
+        this.isPlaying = false
+        if (this.$refs.digitalHuman) {
+          this.$refs.digitalHuman.stopSpeaking()
+        }
+      }
+      this.audioElement.onended = () => {
+        this.isPlaying = false
+        this.currentTime = 0
+        this.playbackPercent = 0
+        if (this.$refs.digitalHuman) {
+          this.$refs.digitalHuman.stopSpeaking()
+        }
+      }
+      this.audioElement.onerror = (e) => {
+        this.isPlaying = false
+        this.audioUrl = ''
+        console.error('[AUDIO DEBUG] Audio error:', e)
+        console.error('[AUDIO DEBUG] Audio error details:', {
+          error: this.audioElement?.error?.message,
+          code: this.audioElement?.error?.code,
+          url: this.audioUrl
+        })
+        uni.showToast({ title: '讲解音频加载失败', icon: 'none' })
+        if (this.$refs.digitalHuman) {
+          this.$refs.digitalHuman.stopSpeaking()
+        }
+      }
+    },
+    destroyAudio() {
+      if (!this.audioElement) return
+      this.audioElement.onloadedmetadata = null
+      this.audioElement.ontimeupdate = null
+      this.audioElement.onplay = null
+      this.audioElement.onpause = null
+      this.audioElement.onended = null
+      this.audioElement.onerror = null
+      this.audioElement.pause()
+      this.audioElement = null
+      this.isPlaying = false
+      this.currentTime = 0
+      this.duration = 0
+      this.playbackPercent = 0
+      if (this.$refs.digitalHuman) {
+        this.$refs.digitalHuman.stopSpeaking()
+      }
+    },
+    async toggleGuidePlayback() {
+      console.log('[AUDIO DEBUG] toggleGuidePlayback called')
+      console.log('[AUDIO DEBUG] canPlayAudio:', this.canPlayAudio)
+      console.log('[AUDIO DEBUG] audioUrl:', this.audioUrl)
+      console.log('[AUDIO DEBUG] audioElement exists:', !!this.audioElement)
+      if (!this.canPlayAudio) {
+        uni.showToast({ title: '讲解音频尚未生成', icon: 'none' })
+        return
+      }
+      if (!this.audioElement) {
+        console.log('[AUDIO DEBUG] audioElement is null, calling prepareAudio')
+        this.prepareAudio()
+      }
+      if (!this.audioElement) return
+
+      try {
+        if (this.audioElement.paused) {
+          console.log('[AUDIO DEBUG] Calling play()')
+          await this.audioElement.play()
+          console.log('[AUDIO DEBUG] play() succeeded')
+        } else {
+          console.log('[AUDIO DEBUG] Calling pause()')
+          this.audioElement.pause()
+        }
+      } catch (e) {
+        console.error('[AUDIO DEBUG] Playback error:', e)
+        uni.showToast({ title: '无法播放讲解音频', icon: 'none' })
+      }
+    },
+    seekAudio(event) {
+      if (!this.audioElement || !this.duration) return
+      const value = Number(event.detail.value || 0)
+      this.playbackPercent = value
+      this.currentTime = (this.duration * value) / 100
+      this.audioElement.currentTime = this.currentTime
+    },
+    formatTime(seconds) {
+      const value = Math.max(0, Math.floor(Number(seconds) || 0))
+      const mins = String(Math.floor(value / 60)).padStart(2, '0')
+      const secs = String(value % 60).padStart(2, '0')
+      return `${mins}:${secs}`
     },
     openNavigation() {
       const lat = Number(this.spotDetail?.latitude)
@@ -324,7 +610,7 @@ export default {
           address: this.spotDetail.location || '灵山胜境景区内'
         })
       } else {
-        uni.showToast({ title: '后续接入地图导航', icon: 'none' })
+        uni.showToast({ title: '后续补充地图导航', icon: 'none' })
       }
     },
     recordNavigateBehavior() {
@@ -339,19 +625,19 @@ export default {
       if (item.type === 'spot') {
         this.loadSpot(item.id)
         uni.pageScrollTo({ scrollTop: 0, duration: 200 })
+        return
+      }
+      const lat = Number(item.latitude)
+      const lon = Number(item.longitude)
+      if (lat && lon) {
+        uni.openLocation({
+          latitude: lat,
+          longitude: lon,
+          name: item.name,
+          address: item.desc || '灵山胜境周边'
+        })
       } else {
-        const lat = Number(item.latitude)
-        const lon = Number(item.longitude)
-        if (lat && lon) {
-          uni.openLocation({
-            latitude: lat,
-            longitude: lon,
-            name: item.name,
-            address: item.desc || '灵山胜境周边'
-          })
-        } else {
-          uni.showToast({ title: '位置信息暂不可用', icon: 'none' })
-        }
+        uni.showToast({ title: '位置信息暂不可用', icon: 'none' })
       }
     }
   }
@@ -376,7 +662,25 @@ export default {
 }
 
 .picker-title,
-.picker-subtitle {
+.picker-subtitle,
+.cover-kicker,
+.cover-title,
+.cover-subtitle,
+.audio-title,
+.audio-subtitle,
+.audio-time,
+.block-title,
+.section-title,
+.paragraph,
+.info-label,
+.info-value,
+.highlight-item,
+.show-time,
+.show-name,
+.nearby-name,
+.nearby-desc,
+.review-name,
+.review-text {
   display: block;
 }
 
@@ -418,11 +722,6 @@ export default {
 .picker-info {
   flex: 1;
   min-width: 0;
-}
-
-.picker-name,
-.picker-desc {
-  display: block;
 }
 
 .picker-name {
@@ -477,21 +776,8 @@ export default {
   position: absolute;
   left: 34rpx;
   right: 34rpx;
-  bottom: 70rpx;
+  bottom: 110rpx;
   color: #fff8e8;
-}
-
-.cover-kicker,
-.cover-title,
-.cover-subtitle {
-  display: block;
-}
-
-.cover-kicker {
-  width: fit-content;
-  padding: 8rpx 16rpx;
-  border: 1rpx solid rgba(255, 248, 232, 0.55);
-  font-size: 22rpx;
 }
 
 .cover-title {
@@ -506,10 +792,17 @@ export default {
   line-height: 1.55;
 }
 
-.panorama-tip {
+.cover-badge-row {
   position: absolute;
-  right: 24rpx;
-  top: 28rpx;
+  left: 34rpx;
+  right: 34rpx;
+  bottom: 34rpx;
+  display: flex;
+  gap: 14rpx;
+  flex-wrap: wrap;
+}
+
+.cover-badge {
   padding: 10rpx 18rpx;
   border-radius: 999rpx;
   background: rgba(255, 248, 232, 0.86);
@@ -519,17 +812,20 @@ export default {
 
 .content {
   padding: 26rpx;
+  padding-bottom: 220rpx;
 }
 
+.audio-card,
 .intro-block,
 .section-card {
   margin-bottom: 22rpx;
   padding: 28rpx;
   border: 1rpx solid rgba(121, 74, 38, 0.12);
   border-radius: 10rpx;
-  background: rgba(255, 251, 242, 0.86);
+  background: rgba(255, 251, 242, 0.92);
 }
 
+.audio-head,
 .title-row {
   display: flex;
   align-items: center;
@@ -537,12 +833,75 @@ export default {
   gap: 20rpx;
 }
 
-.block-title,
-.section-title {
-  display: block;
+.audio-title,
+.section-title,
+.block-title {
   font-size: 32rpx;
   font-weight: 850;
   color: #4b2c1f;
+}
+
+.audio-subtitle,
+.audio-time {
+  margin-top: 8rpx;
+  color: #8b745b;
+  font-size: 24rpx;
+}
+
+.audio-slider {
+  flex: 1;
+  margin: 0;
+}
+
+.audio-control-row {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  margin: 22rpx 0 10rpx;
+}
+
+.audio-toggle {
+  flex-shrink: 0;
+  min-width: 98rpx;
+  min-height: 66rpx;
+  padding: 0 18rpx;
+  border-radius: 10rpx;
+  background: #8c3228;
+  color: #fff8e8;
+  font-size: 24rpx;
+}
+
+.audio-empty-note {
+  flex-shrink: 0;
+  color: #8b745b;
+  font-size: 22rpx;
+  line-height: 1;
+}
+
+.audio-actions {
+  display: flex;
+  gap: 14rpx;
+}
+
+.audio-btn {
+  flex: 1;
+  min-height: 72rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10rpx;
+  background: #f3e3c4;
+  color: #8a3328;
+  font-size: 26rpx;
+}
+
+.audio-btn.primary {
+  background: #8c3228;
+  color: #fff8e8;
+}
+
+.audio-btn[disabled] {
+  opacity: 0.5;
 }
 
 .crowd-tag,
@@ -557,7 +916,6 @@ export default {
 }
 
 .paragraph {
-  display: block;
   margin-top: 18rpx;
   color: #66513f;
   font-size: 27rpx;
@@ -582,11 +940,6 @@ export default {
 .info-cell:nth-child(2) { background: #b38648; }
 .info-cell:nth-child(3) { background: #2f5b68; }
 .info-cell:nth-child(4) { background: #415646; }
-
-.info-label,
-.info-value {
-  display: block;
-}
 
 .info-label {
   font-size: 22rpx;
@@ -615,7 +968,6 @@ export default {
   font-size: 24rpx;
 }
 
-.plain-row,
 .show-row,
 .nearby-row,
 .review-row {
@@ -626,14 +978,12 @@ export default {
   border-bottom: 1rpx solid rgba(121, 74, 38, 0.1);
 }
 
-.plain-row:last-child,
 .show-row:last-child,
 .nearby-row:last-child,
 .review-row:last-child {
   border-bottom: none;
 }
 
-.plain-label,
 .show-time,
 .nearby-action,
 .review-name {
@@ -643,7 +993,6 @@ export default {
   font-size: 25rpx;
 }
 
-.plain-value,
 .show-name,
 .review-text {
   flex: 1;
@@ -715,21 +1064,21 @@ export default {
   align-items: center;
 }
 
-.nearby-name,
-.nearby-desc {
-  display: block;
+.nearby-main {
+  flex: 1;
+  min-width: 0;
 }
 
 .nearby-name {
   color: #3f2b20;
   font-size: 27rpx;
-  font-weight: 800;
 }
 
 .nearby-desc {
   margin-top: 8rpx;
   color: #806b55;
   font-size: 23rpx;
+  line-height: 1.45;
 }
 
 .loading {
@@ -737,5 +1086,20 @@ export default {
   text-align: center;
   color: #8a3328;
   font-size: 28rpx;
+}
+
+.floating-human {
+  position: fixed;
+  right: 18rpx;
+  bottom: calc(110rpx + env(safe-area-inset-bottom));
+  z-index: 40;
+  width: 180rpx;
+  height: 230rpx;
+  pointer-events: none;
+}
+
+.human-frame {
+  width: 100%;
+  height: 100%;
 }
 </style>

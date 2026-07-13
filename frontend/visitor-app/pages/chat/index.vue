@@ -62,10 +62,13 @@ export default {
       scrollTop: 0,
       isLoading: false,
       isVoiceMode: false,
+      chatSessionId: '',
+      chatSessionTimeoutMs: 20 * 60 * 1000,
       quickQuestions: ['梵宫在哪里？', '今天有表演吗？', '推荐游玩路线', '附近有餐厅吗？']
     }
   },
   onLoad(options) {
+    this.ensureChatSession()
     if (options && options.history === 'true') {
       this.loadHistory()
     } else {
@@ -76,10 +79,36 @@ export default {
       })
     }
   },
+  onUnload() {
+    uni.removeStorageSync('chatSession')
+  },
   methods: {
+    createChatSessionId() {
+      return `chat_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+    },
+    ensureChatSession(forceNew = false) {
+      const now = Date.now()
+      const stored = uni.getStorageSync('chatSession') || {}
+      const expired = !stored.lastActiveAt || now - Number(stored.lastActiveAt) > this.chatSessionTimeoutMs
+      if (forceNew || !stored.sessionId || expired) {
+        const next = {
+          sessionId: this.createChatSessionId(),
+          lastActiveAt: now
+        }
+        uni.setStorageSync('chatSession', next)
+        this.chatSessionId = next.sessionId
+        return this.chatSessionId
+      }
+      stored.lastActiveAt = now
+      uni.setStorageSync('chatSession', stored)
+      this.chatSessionId = stored.sessionId
+      return this.chatSessionId
+    },
     async loadHistory() {
       try {
-        const history = await get('/chat/history')
+        const userId = uni.getStorageSync('userId') || 'guest'
+        const sessionId = this.ensureChatSession()
+        const history = await get('/chat/history', { user_id: userId, session_id: sessionId })
         if (history && history.length > 0) {
           this.messages = history.map(item => ({
             isUser: item.role === 'user',
@@ -107,7 +136,9 @@ export default {
       this.isLoading = true
       
       try {
-        const res = await post('/chat', { text })
+        const userId = uni.getStorageSync('userId') || 'guest'
+        const sessionId = this.ensureChatSession()
+        const res = await post('/chat', { text, user_id: userId, session_id: sessionId })
         this.messages.push({
           isUser: false,
           content: res.response || res.answer || '抱歉，我暂时无法回答这个问题',

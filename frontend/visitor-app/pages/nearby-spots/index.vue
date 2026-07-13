@@ -169,8 +169,9 @@ const fallbackSpots = [
 const servicePoints = [
   { id: 'parking-east', name: '东入口停车场', type: 'parking', icon: 'P', latitude: 31.42858, longitude: 120.09422 },
   { id: 'parking-south', name: '南区停车场', type: 'parking', icon: 'P', latitude: 31.42696, longitude: 120.0962 },
-  { id: 'restroom-gate', name: '入口卫生间', type: 'toilet', icon: '卫', latitude: 31.42908, longitude: 120.09512 },
-  { id: 'restroom-buddha', name: '大佛广场卫生间', type: 'toilet', icon: '卫', latitude: 31.43292, longitude: 120.09928 },
+  { id: 'restroom-gate', name: '售票处卫生间', type: 'toilet', icon: '卫', latitude: 31.420139, longitude: 120.103038 },
+  { id: 'restroom-gate', name: '入口卫生间', type: 'toilet', icon: '卫', latitude: 31.4206, longitude: 120.103612 },
+  { id: 'restroom-buddha', name: '大佛广场卫生间', type: 'toilet', icon: '卫', latitude: 31.426747, longitude: 120.097625 },
   { id: 'visitor-center', name: '游客服务中心', type: 'center', icon: 'i', latitude: 31.43039, longitude: 120.09658 },
   { id: 'food-street', name: '香月花街餐饮', type: 'food', icon: '食', latitude: 31.42822, longitude: 120.10282 },
   { id: 'food-palace', name: '梵宫简餐点', type: 'food', icon: '食', latitude: 31.43066, longitude: 120.1009 }

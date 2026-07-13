@@ -90,7 +90,15 @@
     {
       "path": "pages/feedback/index",
       "style": {
-        "navigationBarTitleText": "服务评价",
+        "navigationBarTitleText": "评价与反馈",
+        "navigationBarBackgroundColor": "#ffffff",
+        "navigationBarTextStyle": "black"
+      }
+    },
+    {
+      "path": "pages/customer-service/index",
+      "style": {
+        "navigationBarTitleText": "客服中心",
         "navigationBarBackgroundColor": "#ffffff",
         "navigationBarTextStyle": "black"
       }

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Text, DateTime, Boolean, Float, Date
+from sqlalchemy import Column, String, Integer, Text, DateTime, Boolean, Float, Date, UniqueConstraint
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -56,10 +56,28 @@ class VisitorInteraction(Base):
     __tablename__ = "visitor_interaction"
     id = Column(Integer, primary_key=True, index=True)
     visitor_id = Column(String(100), index=True)
+    session_id = Column(String(100), index=True)
     interaction_type = Column(String(50))
     content = Column(Text)
+    reply_text = Column(Text)
     emotion = Column(String(50))
     satisfaction_score = Column(Float)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class VisitorFeedback(Base):
+    __tablename__ = "visitor_feedback"
+    id = Column(Integer, primary_key=True, index=True)
+    visitor_id = Column(String(100), index=True)
+    session_id = Column(String(100), index=True)
+    feedback_type = Column(String(50), index=True)
+    target_type = Column(String(50), index=True)
+    target_id = Column(String(100))
+    target_name = Column(String(255))
+    source = Column(String(100))
+    tags = Column(Text)
+    comment = Column(Text)
+    satisfaction_score = Column(Float)
+    emotion = Column(String(50))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class RouteHistory(Base):
@@ -131,6 +149,47 @@ class Spot(Base):
     highlights = Column(Text)
     open_info = Column(Text)
     remark = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+class SpotGuideAsset(Base):
+    __tablename__ = "spot_guide_assets"
+    __table_args__ = (
+        UniqueConstraint("spot_id", "style", "voice", name="uq_spot_guide_assets_spot_style_voice"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    spot_id = Column(Integer, nullable=False, index=True)
+    style = Column(String(50), nullable=False, default="standard", index=True)
+    voice = Column(String(50), nullable=False, default="female", index=True)
+    script_text = Column(Text, nullable=False)
+    audio_url = Column(String(500))
+    audio_path = Column(String(500))
+    source_hash = Column(String(64), nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="ready", index=True)
+    error_message = Column(Text)
+    duration_seconds = Column(Integer)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+class SpotNearbyCache(Base):
+    __tablename__ = "spot_nearby_cache"
+    __table_args__ = (
+        UniqueConstraint("cache_key", name="uq_spot_nearby_cache_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    cache_key = Column(String(255), nullable=False, unique=True, index=True)
+    spot_id = Column(Integer, nullable=False, index=True)
+    scenic_area_name = Column(String(255), index=True)
+    center_lat = Column(Float, nullable=False)
+    center_lon = Column(Float, nullable=False)
+    radius_km = Column(Float, nullable=False, default=1.0)
+    payload_json = Column(Text, nullable=False)
+    status = Column(String(20), nullable=False, default="ready", index=True)
+    source = Column(String(50), nullable=False, default="local", index=True)
+    error_message = Column(Text)
+    refreshed_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

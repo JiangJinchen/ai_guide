@@ -3,7 +3,8 @@ from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import Knowledge, DigitalHumanConfig, VisitorInteraction, SystemLog, TicketProduct, ScenicActivity
+from app.models import Knowledge, DigitalHumanConfig, VisitorInteraction, VisitorFeedback, SystemLog, TicketProduct, ScenicActivity, Spot
+from app.services.guide_asset_service import generate_assets_for_spots, get_spot_guide_detail
 from datetime import datetime
 import json
 import re
@@ -73,6 +74,13 @@ class ScenicActivityUpdate(BaseModel):
     content: str | None = None
     significance: str | None = None
     is_active: bool | None = None
+
+class SpotGuideAssetGenerateRequest(BaseModel):
+    spot_id: int | None = None
+    spot_ids: list[int] | None = None
+    style: str = "standard"
+    voice: str = "female"
+    force: bool = False
 
 def validate_activity_type(activity_type: str):
     if activity_type not in {"performance", "zen"}:
@@ -349,24 +357,69 @@ async def delete_scenic_activity(activity_id: int, db: Session = Depends(get_db)
         db.rollback()
         raise HTTPException(status_code=500, detail=f"删除活动信息失败: {str(e)}")
 
+@router.post("/spot-guide-assets/generate")
+async def generate_spot_guide_assets(request: SpotGuideAssetGenerateRequest, db: Session = Depends(get_db)):
+    try:
+        target_ids = set(request.spot_ids or [])
+        if request.spot_id is not None:
+            target_ids.add(request.spot_id)
+
+        query = db.query(Spot)
+        if target_ids:
+            query = query.filter(Spot.id.in_(sorted(target_ids)))
+        spots = query.order_by(Spot.id.asc()).all()
+
+        if not spots:
+            raise HTTPException(status_code=404, detail="未找到需要生成讲解资产的景点")
+
+        results = await generate_assets_for_spots(
+            db,
+            spots,
+            style=request.style,
+            voice=request.voice,
+            force=request.force,
+        )
+        return {
+            "message": "讲解资产生成完成",
+            "total": len(results),
+            "ready_count": sum(1 for item in results if item.get("status") == "ready"),
+            "text_only_count": sum(1 for item in results if item.get("status") == "text_only"),
+            "failed_count": sum(1 for item in results if item.get("status") == "failed"),
+            "items": results,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"生成讲解资产失败: {str(e)}")
+
+@router.get("/spot-guide-assets/{spot_id}")
+async def get_spot_guide_asset(spot_id: int, style: str = "standard", voice: str = "female", db: Session = Depends(get_db)):
+    guide = get_spot_guide_detail(db, spot_id, style, voice)
+    if not guide:
+        raise HTTPException(status_code=404, detail="景点不存在")
+    return guide
+
 @router.get("/report")
 async def get_visitor_report(start_date: str, end_date: str, db: Session = Depends(get_db)):
     try:
         start = datetime.strptime(start_date, "%Y-%m-%d")
         end = datetime.strptime(end_date, "%Y-%m-%d")
-        interactions = db.query(VisitorInteraction).filter(
-            VisitorInteraction.created_at >= start,
-            VisitorInteraction.created_at <= end
+        feedbacks = db.query(VisitorFeedback).filter(
+            VisitorFeedback.created_at >= start,
+            VisitorFeedback.created_at <= end
         ).all()
         
-        satisfaction_rate = 85.5  # 示例数据
-        if interactions:
-            # 计算满意度
-            total = len(interactions)
-            positive = sum(1 for i in interactions if (i.satisfaction_score or 0) >= 4)
+        satisfaction_rate = 85.5
+        comments = []
+        if feedbacks:
+            total = len(feedbacks)
+            positive = sum(1 for f in feedbacks if (f.satisfaction_score or 0) >= 4)
             satisfaction_rate = (positive / total) * 100 if total > 0 else 0
+            comments = [{"id": f.id, "comment": f.comment, "score": f.satisfaction_score, "created_at": f.created_at.isoformat()} 
+                       for f in feedbacks if f.comment]
         
-        return {"report": {"satisfaction_rate": satisfaction_rate, "comments": []}}
+        return {"report": {"satisfaction_rate": satisfaction_rate, "comments": comments}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"生成报告失败: {str(e)}")
 

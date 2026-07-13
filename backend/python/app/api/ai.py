@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from typing import Optional
 import httpx
 import os
 import base64
@@ -18,13 +19,16 @@ from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
-ai_client = httpx.AsyncClient(timeout=60, limits=httpx.Limits(max_connections=10))
+ai_client = httpx.AsyncClient(timeout=30, limits=httpx.Limits(max_connections=20))
 
 router = APIRouter()
 
 class AIRequest(BaseModel):
     text: str
     user_id: str
+    emotion: str = "neutral"
+    emotion_reason: str = ""
+    history: Optional[list] = None
 
 class ASRRequest(BaseModel):
     audio_data: str
@@ -54,17 +58,86 @@ TTS_API_SECRET = os.getenv("TTS_API_SECRET", "")
 QWEN_API_URL = "https://apihub.agnes-ai.com/v1/chat/completions"
 QWEN_MODEL = "agnes-2.0-flash"
 
+SERVICE_INTENT_MAP = {
+    "ticket": {"name": "购票", "path": "/pages/ticket-assistant/index", "keywords": ["门票", "购票", "票价", "买票", "票", "多少钱"], "icon": "🎫"},
+    "activity": {"name": "活动", "path": "/pages/activity-service/index", "keywords": ["演出", "活动", "表演", "禅修", "时间", "节目"], "icon": "🎭"},
+    "route": {"name": "路线规划", "path": "/pages/route-planning/index", "keywords": ["路线", "怎么走", "游览路线", "推荐路线", "规划"], "icon": "🗺️"},
+    "navigation": {"name": "导航", "path": "/pages/route-navigation/index", "keywords": ["导航", "去", "到", "位置", "在哪", "怎么走"], "icon": "🧭"},
+    "guide": {"name": "景点讲解", "path": "/pages/guide/index", "keywords": ["讲解", "介绍", "故事", "文化", "历史"], "icon": "📖"},
+    "nearby": {"name": "附近景点", "path": "/pages/nearby-spots/index", "keywords": ["附近", "周边", "景点", "推荐"], "icon": "📍"},
+    "recommendation": {"name": "个性化推荐", "path": "/pages/recommendation/index", "keywords": ["推荐", "建议", "好玩", "喜欢"], "icon": "⭐"},
+    "profile": {"name": "个人中心", "path": "/pages/profile/index", "keywords": ["我的", "收藏", "偏好", "足迹"], "icon": "👤"}
+}
+
+NAVIGATION_SPOTS = ["灵山大佛", "梵宫", "九龙灌浴", "五印坛城", "祥符禅寺", "灵山胜境"]
+
+def recognize_intent_local(text: str) -> dict:
+    text_lower = text
+    
+    matched_service = None
+    matched_keyword = None
+    max_score = 0
+    
+    for service_type, config in SERVICE_INTENT_MAP.items():
+        for keyword in config["keywords"]:
+            if keyword in text_lower:
+                score = len(keyword) / len(text_lower) if len(text_lower) > 0 else 0
+                if score > max_score:
+                    max_score = score
+                    matched_service = service_type
+                    matched_keyword = keyword
+    
+    if matched_service:
+        params = {}
+        if matched_service == "navigation":
+            for spot in NAVIGATION_SPOTS:
+                if spot in text_lower:
+                    params["spot"] = spot
+                    break
+        
+        print(f"[INTENT] 本地规则命中: {matched_service}, keyword={matched_keyword}, score={max_score}")
+        return {
+            "service": matched_service,
+            "params": params,
+            "source": "local_rule",
+            "confidence": round(max_score, 2)
+        }
+    
+    return {"service": None, "params": {}, "source": "local_rule", "confidence": 0.0}
+
 # ======================
 # 系统提示词
 # ======================
 SYSTEM_PROMPT = """
-你是【灵山胜境】专属智能导游助手。
+你是【灵山胜境】专属智能导游助手，你具有情感感知能力，能够根据游客情绪调整回应方式。
 回答规则：
 1. 如果提供了参考信息（知识库内容），请优先根据参考信息回答，确保准确。
 2. 如果没有参考信息或参考信息不够，请根据你自身的知识回答灵山胜境相关问题。
-3. 回答必须简洁、准确、有礼貌，控制在120字以内，适合语音播报。
+3. 回答必须简洁、准确、有礼貌，必要时可以适当展开，适合语音播报。
 4. 不使用Markdown、表格、项目符号、emoji或复杂符号。
 5. 如果问题与灵山胜境完全无关，请礼貌拒绝回答。
+6. 根据游客情绪调整语气和内容：
+   - positive（开心）：用热情、欢快的语气回应，表达分享的喜悦
+   - negative（难过/焦虑）：先表达理解和安慰，再提供帮助，语气温和关怀
+   - surprised（惊讶）：用好奇、兴奋的语气回应，表现出同感
+   - shy（害羞）：用温柔、鼓励的语气回应，让游客感到放松
+   - angry（生气）：先真诚道歉，表达理解，再积极提供解决方案
+   - neutral（平静）：保持专业、礼貌的正常回应
+7. 服务意图识别：分析用户是否有使用特定服务的需求，可选服务类型包括：
+   - ticket（购票）：涉及门票、票价、购票相关
+   - activity（活动）：涉及演出、表演、活动安排相关
+   - route（路线规划）：涉及游览路线规划相关
+   - navigation（导航）：涉及前往某个地点、位置导航相关
+   - guide（景点讲解）：涉及景点介绍、讲解、故事相关
+   - nearby（附近景点）：涉及周边景点、附近设施相关
+   - recommendation（个性化推荐）：涉及推荐、建议相关
+   - profile（个人中心）：涉及用户个人信息、收藏、足迹相关
+8. 在回答的最后，用JSON格式输出服务意图，格式为：<intent>{"service":"service_type","params":{"key":"value"}}</intent>
+   - 如果识别到明确的服务需求，填写对应的service_type
+   - 如果没有明确的服务需求，填写service为null
+   - params为可选参数，可包含spot_id等信息
+   - 服务意图JSON必须单独占一行，前后用<intent>和</intent>包裹
+   - 例如：<intent>{"service":"navigation","params":{"spot":"灵山大佛"}}</intent>
 """
 
 def clean_tts_text(text: str, max_chars: int = 320) -> str:
@@ -102,7 +175,7 @@ async def ai_inference(request: AIRequest, db: Session = Depends(get_db)):
         ks.sync_from_database(db)
         rag_results = ks.search(request.text, top_k=3)
         knowledge = "\n".join([r["content"] for r in rag_results]) if rag_results else ""
-        return await qwen_inference(request.text, request.user_id, knowledge, rag_results)
+        return await qwen_inference(request.text, request.user_id, knowledge, rag_results, request.emotion, request.emotion_reason, request.history)
     except Exception as e:
         print(f"[AI] ai_inference异常: {str(e)}")
         from app.services.knowledge_service import KnowledgeService
@@ -111,23 +184,87 @@ async def ai_inference(request: AIRequest, db: Session = Depends(get_db)):
         rag_results = ks.search(request.text, top_k=3)
         return await knowledge_fallback_inference(request.text, rag_results)
 
-async def qwen_inference(text: str, user_id: str, knowledge: str = "", rag_results: list = None):
+def parse_service_intent(content: str) -> dict:
+    import re
+    intent_match = re.search(r"<intent>(.*?)</intent>", content, re.S)
+    if not intent_match:
+        return {"service": None, "params": {}}
+    
+    try:
+        intent_str = intent_match.group(1).strip()
+        intent_data = json.loads(intent_str)
+        return {
+            "service": intent_data.get("service"),
+            "params": intent_data.get("params", {})
+        }
+    except Exception as e:
+        print(f"[INTENT] 解析意图失败: {str(e)}")
+        return {"service": None, "params": {}}
+
+def extract_clean_text(content: str) -> str:
+    import re
+    cleaned = re.sub(r"<intent>.*?</intent>", "", content, flags=re.S)
+    return cleaned.strip()
+
+def summarize_rag_results(rag_results: list = None, limit: int = 3) -> list:
+    if not rag_results:
+        return []
+    summary = []
+    for item in rag_results[:limit]:
+        content = item.get("content", "")
+        title = ""
+        for marker in ["知识点：", "景点名称："]:
+            if marker in content:
+                title = content.split(marker, 1)[1].split("\n", 1)[0].strip()
+                break
+        summary.append({
+            "title": title or content[:30],
+            "score": item.get("score", 0)
+        })
+    return summary
+
+async def qwen_inference(text: str, user_id: str, knowledge: str = "", rag_results: list = None, emotion: str = "neutral", emotion_reason: str = "", history: list = None):
     headers = {
         "Authorization": f"Bearer {AI_API_KEY}",
         "Content-Type": "application/json"
     }
 
+    emotion_prompt = f""
+    if emotion and emotion != "neutral":
+        emotion_desc = {
+            "positive": "开心",
+            "negative": "难过/焦虑",
+            "surprised": "惊讶",
+            "shy": "害羞",
+            "angry": "生气"
+        }.get(emotion, emotion)
+        reason_part = f"，原因：{emotion_reason}" if emotion_reason else ""
+        emotion_prompt = f"当前游客情绪：{emotion_desc}{reason_part}。请根据情绪调整回应方式。\n\n"
+
     if knowledge:
-        user_prompt = f"参考信息：\n{knowledge}\n\n问题：{text}"
+        user_prompt = f"{emotion_prompt}参考信息：\n{knowledge}\n\n问题：{text}"
     else:
-        user_prompt = f"知识库中未检索到相关信息，请根据你自身的知识回答：{text}"
+        user_prompt = f"{emotion_prompt}知识库中未检索到相关信息，请根据你自身的知识回答：{text}"
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT}
+    ]
+
+    if history and isinstance(history, list):
+        recent_history = history[-6:]
+        for h in recent_history:
+            if h.get("role") in ["user", "assistant"]:
+                messages.append({
+                    "role": h["role"],
+                    "content": h.get("content", "")[:200]
+                })
+
+    messages.append({"role": "user", "content": user_prompt})
 
     payload = {
         "model": QWEN_MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt}
-        ]
+        "messages": messages,
+        "max_tokens": 768
     }
 
     print(f"[AI] 开始调用Agnes AI: {text[:50]}...")
@@ -146,7 +283,21 @@ async def qwen_inference(text: str, user_id: str, knowledge: str = "", rag_resul
             result = response.json()
             print(f"[AI] Agnes AI返回: {json.dumps(result)[:200]}...")
             content = result["choices"][0]["message"]["content"]
-            return {"text": content, "confidence": 0.9}
+            
+            intent = parse_service_intent(content)
+            clean_text = extract_clean_text(content)
+            
+            return {
+                "text": clean_text,
+                "confidence": 0.9,
+                "intent": intent,
+                "debug": {
+                    "source": "qwen_rag",
+                    "knowledge_used": bool(knowledge.strip() if isinstance(knowledge, str) else knowledge),
+                    "rag_hit_count": len(rag_results or []),
+                    "rag_hits": summarize_rag_results(rag_results),
+                }
+            }
         except httpx.TimeoutException:
             print(f"[AI] Agnes AI超时(第{attempt+1}/{max_retries}次)")
             if attempt < max_retries - 1:
@@ -162,7 +313,17 @@ async def qwen_inference(text: str, user_id: str, knowledge: str = "", rag_resul
             break
 
     print(f"[AI] Agnes AI调用失败，使用知识库降级方案")
-    return await knowledge_fallback_inference(text, rag_results)
+    fallback_result = await knowledge_fallback_inference(text, rag_results)
+    return {
+        **fallback_result,
+        "intent": {"service": None, "params": {}},
+        "debug": {
+            **fallback_result.get("debug", {}),
+            "source": "knowledge_fallback_after_ai_failure",
+            "rag_hit_count": len(rag_results or []),
+            "rag_hits": summarize_rag_results(rag_results),
+        }
+    }
 
 async def local_fallback_inference(text: str):
     responses = {
@@ -202,11 +363,24 @@ async def local_fallback_inference(text: str):
     for k, v in responses.items():
         if k in text:
             print(f"[AI] 使用本地回复: {k} → {v[:30]}...")
-            return {"text": v, "confidence": 0.8}
+            return {
+                "text": v,
+                "confidence": 0.8,
+                "debug": {
+                    "source": "local_keyword",
+                    "matched_keyword": k
+                }
+            }
     
     default_response = "我是灵山胜境专属导游，只回答景区相关问题。您可以问我关于景点、路线、演出、门票等方面的问题。"
     print(f"[AI] 使用默认回复")
-    return {"text": default_response, "confidence": 0.5}
+    return {
+        "text": default_response,
+        "confidence": 0.5,
+        "debug": {
+            "source": "local_default"
+        }
+    }
 
 async def knowledge_fallback_inference(text: str, rag_results: list = None):
     if rag_results and len(rag_results) > 0:
@@ -227,18 +401,41 @@ async def knowledge_fallback_inference(text: str, rag_results: list = None):
             
             if answer_lines:
                 knowledge_answer = "。".join(answer_lines)
-                if len(knowledge_answer) > 150:
-                    knowledge_answer = knowledge_answer[:150] + "。"
                 print(f"[AI] 知识库生成回答: {knowledge_answer[:50]}...")
-                return {"text": knowledge_answer, "confidence": 0.7}
+                return {
+                    "text": knowledge_answer,
+                    "confidence": 0.7,
+                    "debug": {
+                        "source": "knowledge_fallback",
+                        "best_score": score,
+                        "rag_hit_count": len(rag_results or []),
+                        "rag_hits": summarize_rag_results(rag_results)
+                    }
+                }
             
-            if len(content) > 150:
-                content = content[:150] + "。"
             print(f"[AI] 知识库内容直接回答: {content[:50]}...")
-            return {"text": content, "confidence": 0.6}
+            return {
+                "text": content,
+                "confidence": 0.6,
+                "debug": {
+                    "source": "knowledge_fallback",
+                    "best_score": score,
+                    "rag_hit_count": len(rag_results or []),
+                    "rag_hits": summarize_rag_results(rag_results)
+                }
+            }
     
     print(f"[AI] 知识库无匹配，使用关键词降级方案")
-    return await local_fallback_inference(text)
+    fallback = await local_fallback_inference(text)
+    return {
+        **fallback,
+        "debug": {
+            **fallback.get("debug", {}),
+            "source": "knowledge_fallback_to_local",
+            "rag_hit_count": len(rag_results or []),
+            "rag_hits": summarize_rag_results(rag_results)
+        }
+    }
 
 # ======================
 # 讯飞 ASR
@@ -389,11 +586,16 @@ async def text_to_speech(request: TTSRequest):
             return await local_fallback_tts(request.text)
 
         if TTS_APP_ID and TTS_API_KEY and TTS_API_SECRET:
-            return await xunfei_tts(speech_text, request.voice)
+            try:
+                return await xunfei_tts(speech_text, request.voice)
+            except Exception as e:
+                print(f"[TTS] 讯飞合成失败，降级到本地方案: {str(e)}")
+                return await local_fallback_tts(speech_text)
         else:
             return await local_fallback_tts(speech_text)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"TTS失败：{str(e)}")
+        print(f"[TTS] 接口异常，降级到本地方案: {str(e)}")
+        return await local_fallback_tts(request.text)
 
 async def xunfei_tts(text: str, voice: str = "female"):
     APP_ID = TTS_APP_ID
@@ -473,7 +675,13 @@ def create_auth_url(host_url: str, api_key: str, api_secret: str) -> str:
     return f"{host_url}?{urlencode(params)}"
 
 async def local_fallback_tts(text: str):
-    return {"audio_data": "", "duration": 0.3, "note": "请配置TTS密钥"}
+    speech_text = clean_tts_text(text)
+    return {
+        "audio_data": "",
+        "duration": max(0.3, len(speech_text) * 0.18),
+        "speech_text": speech_text,
+        "note": "TTS已降级"
+    }
 
 # ======================
 # RAG

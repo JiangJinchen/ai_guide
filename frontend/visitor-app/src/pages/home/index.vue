@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <view class="home-page">
     <view class="top-search">
       <view class="search-box">
@@ -115,8 +115,8 @@
 
     <view class="section today-section">
       <view class="section-head">
-        <text class="section-title">今日灵山</text>
-        <text class="section-more" @click="openActivityList('performance')">未开始演出</text>
+        <text class="section-title">今日演出</text>
+        <text class="section-more" @click="openActivityList('performance')">更多</text>
       </view>
       <view class="notice-list">
         <view
@@ -132,7 +132,7 @@
           </view>
         </view>
         <view class="notice-empty" v-if="!notices.length">
-          <text>今日暂无未开始演出，请以景区当日公告为准。</text>
+          <text>今日暂无演出安排</text>
         </view>
       </view>
     </view>
@@ -142,11 +142,20 @@
 <script>
 import { get, post } from '@/utils/request'
 
+/*
 const fallbackSpots = [
-  { id: 1, name: '灵山大佛', summary: '太湖之滨的地标佛像，适合祈福与远眺。' },
-  { id: 2, name: '灵山梵宫', summary: '佛教艺术殿堂，建筑、壁画与演出皆值得停留。' },
-  { id: 3, name: '九龙灌浴', summary: '经典动态表演场景，适合亲子和初到游客。' },
-  { id: 4, name: '五印坛城', summary: '藏传佛教文化空间，色彩浓烈，适合拍照打卡。' }
+  { id: 1, name: '鐏靛北澶т經', summary: '澶箹涔嬫花鐨勫湴鏍囦經鍍忥紝閫傚悎绁堢涓庤繙鐪恒€? },
+  { id: 2, name: '鐏靛北姊靛', summary: '浣涙暀鑹烘湳娈垮爞锛屽缓绛戙€佸鐢讳笌婕斿嚭鐨嗗€煎緱鍋滅暀銆? },
+  { id: 3, name: '涔濋緳鐏屾荡', summary: '缁忓吀鍔ㄦ€佽〃婕斿満鏅紝閫傚悎浜插瓙鍜屽垵鍒版父瀹€? },
+  { id: 4, name: '浜斿嵃鍧涘煄', summary: '钘忎紶浣涙暀鏂囧寲绌洪棿锛岃壊褰╂祿鐑堬紝閫傚悎鎷嶇収鎵撳崱銆? }
+]
+
+*/
+const fallbackSpots = [
+  { id: 1, name: '灵山大佛', summary: '江南之花的地标佛像，适合祈福与远眺。' },
+  { id: 2, name: '灵山梵宫', summary: '佛教文化艺术殿堂，建筑、壁画与演出的完美融合。' },
+  { id: 3, name: '九龙灌浴', summary: '经典动态表演景观，适合亲子和初次游客。' },
+  { id: 4, name: '五印坛城', summary: '藏传佛教文化空间，色彩绚丽，适合游览打卡。' }
 ]
 
 export default {
@@ -156,20 +165,77 @@ export default {
       activeHero: 0,
       activeService: 'student',
       spots: fallbackSpots,
+      /*
       heroSlides: [
-        { kicker: '无锡 太湖 灵山', title: '一日入胜境', desc: '沿山水、佛光与梵音，慢游灵山。' },
-        { kicker: '梵宫华彩', title: '见建筑如诗', desc: '在穹顶、壁画与光影之间感受佛教艺术。' },
-        { kicker: '礼佛祈福', title: '听一场晨钟', desc: '从九龙灌浴到灵山大佛，步步皆有故事。' }
+        { kicker: '鏃犻敗 澶箹 鐏靛北', title: '涓€鏃ュ叆鑳滃', desc: '娌垮北姘淬€佷經鍏変笌姊甸煶锛屾參娓哥伒灞便€? },
+        { kicker: '姊靛鍗庡僵', title: '瑙佸缓绛戝璇?, desc: '鍦ㄧ┕椤躲€佸鐢讳笌鍏夊奖涔嬮棿鎰熷彈浣涙暀鑹烘湳銆? },
+        { kicker: '绀间經绁堢', title: '鍚竴鍦烘櫒閽?, desc: '浠庝節榫欑亴娴村埌鐏靛北澶т經锛屾姝ョ殕鏈夋晠浜嬨€? }
+      ],
+      */
+      /*
+      serviceGroups: [
+        {
+          key: 'student',
+          name: '瀵艰鏈嶅姟',
+          subtitle: '浠庨棶绛斿埌璁茶В锛屾妸鏅尯鏁呬簨浜ょ粰鏅鸿兘瀵兼父',
+          icon: '娓?,
+          summary: '浠庨棶绛斿埌璁茶В锛屾妸鏅尯鏁呬簨浜ょ粰鏅鸿兘瀵兼父銆?,
+          items: [
+            { name: 'AI鏁板瓧浜?, url: '/pages/chat/index', tab: true, desc: '璇煶闂瓟涓庢櫤鑳借瑙? },
+            { name: '鏅偣璁茶В', url: '/pages/guide/index', desc: '鏌ョ湅鏅偣璇︽儏' },
+            { name: '璺嚎瑙勫垝', url: '/pages/route-planning/index', desc: '瀹氬埗娓歌椤哄簭' }
+          ]
+        },
+        {
+          key: 'teacher',
+          name: '娓哥帺鏈嶅姟',
+          subtitle: '瀹夋帓鏇撮『璺殑娓歌浣撻獙',
+          icon: '琛?,
+          summary: '瀹夋帓鏇撮『璺殑娓歌浣撻獙銆?,
+          items: [
+            { name: '闄勮繎鏅偣', url: '/pages/nearby-spots/index', desc: '鍩轰簬瀹氫綅鎺ㄨ崘' },
+            { name: '绁ㄥ姟鍔╂墜', url: '/pages/ticket-assistant/index', desc: '闂ㄧエ涓庤鍏夎溅淇℃伅' },
+            { name: '涓€ф帹鑽?, url: '/pages/recommendation/index', desc: '鎸夊亸濂芥帹鑽愭櫙鐐? },
+          ]
+        },
+        {
+          key: 'education',
+          name: '娲诲姩鏈嶅姟',
+          subtitle: '婕斿嚭鏃堕棿涓庣淇綋楠?,
+          icon: '绂?,
+          summary: '鑱氬悎婕斿嚭鏃堕棿涓庣淇綋楠屾彁閱掋€?,
+          items: [
+            { name: '婕斿嚭鏃堕棿', url: '/pages/activity-service/index?type=performance', desc: '鏌ョ湅鏈紑濮嬪満娆? },
+            { name: '绂呬慨浣撻獙', url: '/pages/activity-service/index?type=zen', desc: '浣撻獙浠嬬粛涓庣幇鍦烘寚寮? }
+          ]
+        },
+        {
+          key: 'alumni',
+          name: '娓稿鏈嶅姟',
+          subtitle: '绠＄悊涓汉淇℃伅',
+          icon: '瀹?,
+          summary: '绠＄悊涓汉淇℃伅鍏ュ彛銆?,
+          items: [
+            { name: '涓汉涓績', url: '/pages/profile/index', tab: true, desc: '鍋忓ソ鍜岃冻杩? },
+            { name: '鑱旂郴瀹㈡湇', url: '/pages/profile/index', tab: true, desc: '浜哄伐瀹㈡湇鍏ュ彛' }
+          ]
+        }
+      ],
+      */
+      heroSlides: [
+        { kicker: '无锡 灵山 胜境', title: '一日入胜境', desc: '灵山秀水、佛像与梵音，尽享悠然。' },
+        { kicker: '梵宫华章', title: '见建筑如诗', desc: '在艺术、壁画与光影之间感受佛教文化。' },
+        { kicker: '祈福朝圣', title: '闻一声晨钟', desc: '从六度桥到灵山大佛，步步皆有故事。' }
       ],
       serviceGroups: [
         {
           key: 'student',
           name: '导览服务',
           subtitle: '从问答到讲解，把景区故事交给智能导游',
-          icon: '游',
-          summary: '从问答到讲解，把景区故事交给智能导游。',
+          icon: '导',
+          summary: 'AI问答、景点讲解和路线规划。',
           items: [
-            { name: 'AI数字人', url: '/pages/chat/index', tab: true, desc: '语音问答与智能讲解' },
+            { name: 'AI数字人', url: '/pages/chat/index', tab: true, desc: '语音问答与智能导览' },
             { name: '景点讲解', url: '/pages/guide/index', desc: '查看景点详情' },
             { name: '路线规划', url: '/pages/route-planning/index', desc: '定制游览顺序' }
           ]
@@ -177,24 +243,23 @@ export default {
         {
           key: 'teacher',
           name: '游玩服务',
-          subtitle: '安排更顺路的游览体验',
-          icon: '行',
-          summary: '安排更顺路的游览体验。',
+          subtitle: '安排更顺畅的游玩体验',
+          icon: '游',
+          summary: '附近景点、票务信息和个性化推荐。',
           items: [
-            { name: '附近景点', url: '/pages/nearby-spots/index', desc: '基于定位推荐' },
+            { name: '附近景点', url: '/pages/nearby-spots/index', desc: '基于位置推荐' },
             { name: '票务助手', url: '/pages/ticket-assistant/index', desc: '门票与观光车信息' },
-            { name: '个性推荐', url: '/pages/recommendation/index', desc: '按偏好推荐景点' },
-            { name: '服务评价', url: '/pages/feedback/index', desc: '提交体验反馈' }
+            { name: '个性推荐', url: '/pages/recommendation/index', desc: '按偏好推荐景点' }
           ]
         },
         {
           key: 'education',
           name: '活动服务',
-          subtitle: '演出时间与禅修体验',
-          icon: '禅',
-          summary: '聚合演出时间与禅修体验提醒。',
+          subtitle: '演出时间与体验提醒',
+          icon: '活',
+          summary: '演出时间和体验介绍。',
           items: [
-            { name: '演出时间', url: '/pages/activity-service/index?type=performance', desc: '查看未开始场次' },
+            { name: '演出时间', url: '/pages/activity-service/index?type=performance', desc: '查看即将开场场次' },
             { name: '禅修体验', url: '/pages/activity-service/index?type=zen', desc: '体验介绍与现场指引' }
           ]
         },
@@ -202,10 +267,10 @@ export default {
           key: 'alumni',
           name: '游客服务',
           subtitle: '管理个人信息',
-          icon: '客',
-          summary: '管理个人信息入口。',
+          icon: '服',
+          summary: '个人中心和客服入口。',
           items: [
-            { name: '个人中心', url: '/pages/profile/index', tab: true, desc: '偏好和足迹' },
+            { name: '个人中心', url: '/pages/profile/index', tab: true, desc: '偏好与足迹' },
             { name: '联系客服', url: '/pages/profile/index', tab: true, desc: '人工客服入口' }
           ]
         }
@@ -264,7 +329,7 @@ export default {
           this.spots = list.map(item => ({
             id: item.id,
             name: item.spot_name || item.name,
-            summary: item.description || item.culture_connotation || '灵山胜境人气景点。'
+            summary: item.description || item.culture_connotation || '热门景点'
           }))
         }
       } catch (e) {
@@ -293,7 +358,7 @@ export default {
     },
     formatActivityDesc(activity) {
       const place = activity.location ? `地点：${activity.location}` : '地点以现场公告为准'
-      const note = activity.schedule_note || '以景区当日公告为准'
+      const note = activity.schedule_note || '具体以景区当日公告为准'
       return `${place} · ${note}`
     },
     handleSearch() {
@@ -318,7 +383,7 @@ export default {
     goToService(service) {
       if (service.anchor === 'today') {
         this.keyword = ''
-        uni.showToast({ title: '已为您定位到今日灵山', icon: 'none' })
+        uni.showToast({ title: '宸蹭负鎮ㄥ畾浣嶅埌浠婃棩鐏靛北', icon: 'none' })
         return
       }
       if (service.tab) {
@@ -867,3 +932,4 @@ export default {
   text-align: center;
 }
 </style>
+

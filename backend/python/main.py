@@ -1,4 +1,5 @@
 import logging
+import os
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -7,6 +8,7 @@ logging.basicConfig(
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from app.api import router as api_router
 from app.database import engine, Base
 from dotenv import load_dotenv
@@ -18,6 +20,9 @@ app = FastAPI(
     description="为游客提供智能导览服务，为管理员提供景区管理功能",
     version="1.0.0"
 )
+
+STORAGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "storage", "guide-assets")
+app.mount("/api/visitor/guide-assets", StaticFiles(directory=STORAGE_DIR), name="guide-assets")
 
 app.add_middleware(
     CORSMiddleware,

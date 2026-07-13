@@ -5,6 +5,8 @@ export default {
       const userId = 'visitor_' + Date.now()
       uni.setStorageSync('userId', userId)
     }
+    const launchCount = Number(uni.getStorageSync('appLaunchCount') || 0)
+    uni.setStorageSync('appLaunchCount', launchCount + 1)
   },
   onShow() {},
   onHide() {}
