@@ -236,37 +236,16 @@ export default {
       return this.waypoints.findIndex(spot => this.pointKey(spot) === this.selectedWaypointKey)
     },
     visibleWaypointNameKeys() {
-      const candidates = this.waypoints
-        .map((spot, index) => {
-          const key = this.pointKey(spot)
-          const isSelected = key === this.selectedWaypointKey
-          const isActive = index === this.activeWaypointIndex
-          const isNext = index === this.nextWaypointIndex
-          const canShowByZoom = this.mapScale >= 18
-          if (!isSelected && !isActive && !isNext && !canShowByZoom) return null
-          return {
-            spot,
-            key,
-            priority: (isSelected ? 100 : 0) + (isActive ? 80 : 0) + (isNext ? 60 : 0) + (canShowByZoom ? 10 : 0)
-          }
-        })
-        .filter(Boolean)
-        .sort((a, b) => b.priority - a.priority)
-
-      const visible = []
-      const minDistance = this.mapScale >= 18 ? 32 : 56
-      candidates.forEach(candidate => {
-        const overlaps = visible.some(item => {
-          return this.calcDistanceM(
-            candidate.spot.latitude,
-            candidate.spot.longitude,
-            item.spot.latitude,
-            item.spot.longitude
-          ) < minDistance
-        })
-        if (!overlaps) visible.push(candidate)
-      })
-      return visible.map(item => item.key)
+      const keys = []
+      const pushKey = (index) => {
+        const spot = this.waypoints[index]
+        const key = spot ? this.pointKey(spot) : ''
+        if (key && !keys.includes(key)) keys.push(key)
+      }
+      if (this.selectedWaypointKey) keys.push(this.selectedWaypointKey)
+      pushKey(this.activeWaypointIndex)
+      pushKey(this.nextWaypointIndex)
+      return keys
     },
     totalDistance() {
       return this.navigationData?.total_distance_m || this.navigationPlan?.total_distance || 0
@@ -330,27 +309,19 @@ export default {
     },
     mapMarkers() {
       const markers = []
-      if (this.isValidPoint(this.currentLocation || this.startLocation)) {
-        const start = this.currentLocation || this.startLocation
+      if (this.isValidPoint(this.startLocation)) {
+        const start = this.startLocation
         markers.push({
           id: START_MARKER_ID,
           latitude: Number(start.latitude),
           longitude: Number(start.longitude),
-          title: this.currentLocation ? '当前位置' : this.startName,
+          title: this.startName,
           width: 30,
           height: 30,
           iconPath: startIcon,
-          label: {
-            content: this.currentLocation ? '我' : '起',
-            color: '#ffffff',
-            fontSize: 12,
-            bgColor: '#2f7d55',
-            borderRadius: 15,
-            padding: 5
-          },
           callout: {
-            content: this.currentLocation ? '当前点位' : `起点 · ${this.startName}`,
-            display: 'ALWAYS',
+            content: `起点 · ${this.startName}`,
+            display: 'BYCLICK',
             color: '#37251a',
             bgColor: '#fff8e8',
             padding: 8,
@@ -361,7 +332,6 @@ export default {
 
       this.waypoints.forEach((spot, index) => {
         if (!this.isValidPoint(spot)) return
-        const arrived = this.isWaypointArrived(spot)
         const isSelected = this.pointKey(spot) === this.selectedWaypointKey
         const isActive = index === this.activeWaypointIndex
         const isNext = index === this.nextWaypointIndex
@@ -371,27 +341,21 @@ export default {
           id: WAYPOINT_MARKER_ID_BASE + index,
           latitude: Number(spot.latitude),
           longitude: Number(spot.longitude),
-          title: spot.name,
-          width: isSelected || isActive || isNext ? 34 : 28,
-          height: isSelected || isActive || isNext ? 34 : 28,
-          iconPath: waypointIcon,
-          label: {
-            content: arrived ? '✓' : (isEnd ? '终' : String(spot.order || index + 1)),
-            color: '#ffffff',
-            fontSize: 12,
-            bgColor: arrived ? '#2f7d55' : (isEnd ? '#8c3228' : '#c19148'),
-            borderRadius: 14,
-            padding: 5
-          },
-          callout: {
-            content: `${spot.order || index + 1} · ${spot.name}`,
-            display: shouldShowName ? 'ALWAYS' : 'BYCLICK',
+          title: shouldShowName ? spot.name : '',
+          width: isSelected || isActive || isNext || isEnd ? 34 : 28,
+          height: isSelected || isActive || isNext || isEnd ? 34 : 28,
+          iconPath: waypointIcon
+        })
+        if (shouldShowName) {
+          markers[markers.length - 1].callout = {
+            content: spot.name,
+            display: 'ALWAYS',
             color: '#37251a',
             bgColor: '#fff8e8',
             padding: 8,
             borderRadius: 6
           }
-        })
+        }
       })
       return markers
     },
@@ -576,7 +540,7 @@ export default {
       const start = options.startPoint || this.currentLocation || this.navigationPlan.start_location || DEFAULT_LOCATION
       const sourceWaypoints = options.remainingOnly ? this.getRemainingWaypoints() : (this.navigationPlan.waypoints || [])
       return {
-        user_id: uni.getStorageSync('userId') || 'guest',
+        user_id: String(uni.getStorageSync('userId') || 'guest'),
         provider: 'amap',
         travel_mode: this.navigationPlan.travel_mode || 'walking',
         route_name: this.navigationPlan.route_name || '游览路线',
@@ -600,7 +564,7 @@ export default {
 
       this.isLoading = true
       try {
-        const result = await post('/routes/navigation', payload)
+        const result = await post('/routes/navigation', payload, { timeout: 180000 })
         this.navigationData = result
         this.activeStepIndex = 0
         this.navigationCompleted = false

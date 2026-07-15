@@ -91,7 +91,8 @@ const request = (options) => {
           url: fullUrl,
           error
         })
-        uni.showToast({ title: 'Network request failed', icon: 'none' })
+        const isTimeout = typeof error?.errMsg === 'string' && error.errMsg.includes('timeout')
+        uni.showToast({ title: isTimeout ? '请求超时，请稍后重试' : 'Network request failed', icon: 'none' })
         reject(error || new Error('Network request failed'))
       }
     })
@@ -99,8 +100,8 @@ const request = (options) => {
 }
 
 export const get = (url, data = {}) => request({ url, method: 'GET', data })
-export const post = (url, data = {}) => request({ url, method: 'POST', data })
-export const put = (url, data = {}) => request({ url, method: 'PUT', data })
-export const del = (url, data = {}) => request({ url, method: 'DELETE', data })
+export const post = (url, data = {}, options = {}) => request({ url, method: 'POST', data, ...options })
+export const put = (url, data = {}, options = {}) => request({ url, method: 'PUT', data, ...options })
+export const del = (url, data = {}, options = {}) => request({ url, method: 'DELETE', data, ...options })
 
 export default request

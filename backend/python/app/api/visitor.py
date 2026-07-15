@@ -2156,6 +2156,12 @@ class NavigationRouteRequest(BaseModel):
     waypoints: List[NavigationPoint] = Field(default_factory=list)
     manual_order_locked: bool = False
 
+    @validator("user_id", pre=True)
+    def normalize_user_id(cls, value):
+        if value in (None, ""):
+            return "guest"
+        return str(value)
+
 def route_spot_name(spot):
     if isinstance(spot, dict):
         return spot.get("spot_name") or spot.get("name") or "灵山景点"
@@ -2332,7 +2338,7 @@ def fetch_amap_walking_distance(origin_lat, origin_lng, destination_lat, destina
                 continue
             return None
 
-def resolve_segment_metrics(origin, destination, travel_mode, db=None, distance_memo=None):
+def resolve_segment_metrics(origin, destination, travel_mode, db=None, distance_memo=None, allow_live_provider=True):
     if not origin or not destination:
         return local_segment_metrics(None, None, None, None, travel_mode)
     if not all([origin.get("latitude"), origin.get("longitude"), destination.get("latitude"), destination.get("longitude")]):
@@ -2364,26 +2370,27 @@ def resolve_segment_metrics(origin, destination, travel_mode, db=None, distance_
             distance_memo[key] = cached
         return cached
 
-    amap_metrics = fetch_amap_walking_distance(
-        origin["latitude"],
-        origin["longitude"],
-        destination["latitude"],
-        destination["longitude"]
-    )
-    if amap_metrics:
-        amap_metrics["straight_distance"] = calc_distance_m(
+    if allow_live_provider:
+        amap_metrics = fetch_amap_walking_distance(
             origin["latitude"],
             origin["longitude"],
             destination["latitude"],
             destination["longitude"]
         )
-        if travel_mode != "walking":
-            amap_metrics["travel_minutes"] = estimate_segment_minutes(amap_metrics["distance"], travel_mode)
-            amap_metrics["duration_sec"] = amap_metrics["travel_minutes"] * 60
-        save_segment_metrics_cache(db, key, origin, destination, travel_mode, amap_metrics)
-        if distance_memo is not None:
-            distance_memo[key] = amap_metrics
-        return amap_metrics
+        if amap_metrics:
+            amap_metrics["straight_distance"] = calc_distance_m(
+                origin["latitude"],
+                origin["longitude"],
+                destination["latitude"],
+                destination["longitude"]
+            )
+            if travel_mode != "walking":
+                amap_metrics["travel_minutes"] = estimate_segment_minutes(amap_metrics["distance"], travel_mode)
+                amap_metrics["duration_sec"] = amap_metrics["travel_minutes"] * 60
+            save_segment_metrics_cache(db, key, origin, destination, travel_mode, amap_metrics)
+            if distance_memo is not None:
+                distance_memo[key] = amap_metrics
+            return amap_metrics
 
     fallback = local_segment_metrics(
         origin["latitude"],
@@ -2466,11 +2473,19 @@ def local_navigation_segment(origin, destination, travel_mode):
     }
 
 @amap_rate_limited
-def fetch_amap_walking_navigation(origin, destination):
+def fetch_amap_walking_navigation(origin, destination, timeout_seconds=5.0):
     if not AMAP_WEB_KEY:
         logger.info("[AMAP] 高德API密钥未配置，跳过高德导航")
         return None
 
+    logger.info(
+        "[AMAP] 请求步行导航 origin=(%s,%s) destination=(%s,%s) timeout=%ss",
+        origin.get("latitude"),
+        origin.get("longitude"),
+        destination.get("latitude"),
+        destination.get("longitude"),
+        timeout_seconds,
+    )
     params = {
         "key": AMAP_WEB_KEY,
         "origin": f"{origin['longitude']},{origin['latitude']}",
@@ -2478,7 +2493,7 @@ def fetch_amap_walking_navigation(origin, destination):
     }
 
     try:
-        with httpx.Client(timeout=10, verify=False) as client:
+        with httpx.Client(timeout=timeout_seconds, verify=False) as client:
             response = client.get(AMAP_WALKING_URL, params=params)
             response.raise_for_status()
             payload = response.json()
@@ -2488,6 +2503,7 @@ def fetch_amap_walking_navigation(origin, destination):
             err_code = payload.get("infocode")
             err_msg = payload.get("info")
             logger.warning(f"[AMAP] 高德API返回错误 - status={status}, infocode={err_code}, info={err_msg}")
+            logger.warning("[AMAP] 步行导航失败 payload=%s", payload)
             if err_code == "10001":
                 logger.error("[AMAP] 高德API密钥无效或已过期")
             elif err_code == "10002":
@@ -2670,6 +2686,14 @@ def build_navigation_route(request: NavigationRouteRequest):
     start = nav_point_payload(request.start)
     waypoints = [nav_point_payload(point) for point in request.waypoints]
 
+    logger.info(
+        "[NAV] build_navigation_route provider=%s travel_mode=%s waypoint_count=%s manual_order_locked=%s",
+        request.provider,
+        travel_mode,
+        len(waypoints),
+        request.manual_order_locked
+    )
+
     if not request.manual_order_locked:
         waypoints = reorder_waypoints(start, waypoints)
     
@@ -2683,11 +2707,27 @@ def build_navigation_route(request: NavigationRouteRequest):
     segments = []
     providers = []
     previous = start
-
     for index, destination in enumerate(waypoints):
-        segment = fetch_amap_walking_navigation(previous, destination)
+        segment = fetch_amap_walking_navigation(previous, destination) if request.provider == "amap" else None
         if not segment:
             segment = local_navigation_segment(previous, destination, travel_mode)
+            logger.info(
+                "[NAV] segment %s fallback local from=%s to=%s distance=%s duration=%s",
+                index + 1,
+                previous.get("name"),
+                destination.get("name"),
+                segment.get("distance_m"),
+                segment.get("duration_sec")
+            )
+        else:
+            logger.info(
+                "[NAV] segment %s use amap from=%s to=%s distance=%s duration=%s",
+                index + 1,
+                previous.get("name"),
+                destination.get("name"),
+                segment.get("distance_m"),
+                segment.get("duration_sec")
+            )
 
         providers.append(segment["provider"])
         total_distance += int(segment.get("distance_m") or 0)
@@ -2719,6 +2759,13 @@ def build_navigation_route(request: NavigationRouteRequest):
 
     provider_type = "amap_walking" if providers and all(item == "amap_walking" for item in providers) else (
         "amap_walking_with_fallback" if "amap_walking" in providers else "haversine_navigation"
+    )
+
+    logger.info(
+        "[NAV] build_navigation_route done provider_type=%s total_distance=%s total_duration=%s",
+        provider_type,
+        total_distance,
+        total_duration
     )
 
     return {
@@ -2913,7 +2960,8 @@ def build_route(
     travel_mode="walking",
     db: Optional[Session] = None,
     distance_memo=None,
-    start_spot_id=None
+    start_spot_id=None,
+    allow_live_provider=True
 ):
     travel_mode = normalize_travel_mode(travel_mode)
     travel_config = TRAVEL_MODE_CONFIG[travel_mode]
@@ -2933,7 +2981,7 @@ def build_route(
     for index, item in enumerate(route):
         origin = coordinate_payload(prev_lat, prev_lon, prev_name, prev_id) if prev_lat and prev_lon else None
         destination = coordinate_payload(item["latitude"], item["longitude"], item["name"], item["id"])
-        metrics = resolve_segment_metrics(origin, destination, travel_mode, db, distance_memo) if origin else {
+        metrics = resolve_segment_metrics(origin, destination, travel_mode, db, distance_memo, allow_live_provider) if origin else {
             "provider": "no_start_location",
             "straight_distance": 0,
             "distance": 0,
@@ -3126,7 +3174,8 @@ def select_route_spots(
             travel_mode,
             db,
             distance_memo,
-            start_spot_id
+            start_spot_id,
+            allow_live_provider=False
         )
         if next_route["total_duration"] <= budget or len(selected) < max(1, min(2, target_count)):
             selected = next_selected
@@ -3211,7 +3260,8 @@ def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)
             travel_mode,
             db,
             distance_memo,
-            request.start_spot_id
+            request.start_spot_id,
+            allow_live_provider=False
         )
         signature = tuple(item["id"] for item in route["route"])
         if signature in seen_signatures:
@@ -3241,7 +3291,8 @@ def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)
                 travel_mode,
                 db,
                 distance_memo,
-                request.start_spot_id
+                request.start_spot_id,
+                allow_live_provider=False
             )
             signature = tuple(item["id"] for item in route["route"])
             if signature in seen_signatures:

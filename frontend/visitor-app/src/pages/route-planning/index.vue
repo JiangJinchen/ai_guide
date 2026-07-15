@@ -353,7 +353,7 @@ export default {
           longitude: Number.isFinite(Number(this.userLocation?.longitude)) ? Number(this.userLocation.longitude) : null
         }
         console.info('[route-planning] generateRoutes payload', payload)
-        const res = await post('/routes/generate', payload)
+        const res = await post('/routes/generate', payload, { timeout: 180000 })
         this.routeOptions = res.routes || []
         if (!this.routeOptions.length) {
           uni.showToast({ title: '暂无可用路线', icon: 'none' })

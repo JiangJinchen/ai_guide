@@ -115,11 +115,9 @@
         v-for="spot in filteredSpots"
         :key="spot.id"
         :id="mapItemDomId(spot, 'spot')"
-        @click="selectMapItem(spot, 'spot')"
+        @click="openSpotDetail(spot)"
       >
-        <view class="spot-thumb" :class="'spot-' + spot.type">
-          <text>{{ spot.typeLabel.slice(0, 1) }}</text>
-        </view>
+        <image class="spot-thumb" :src="spot.image" mode="aspectFill" />
         <view class="spot-main">
           <view class="spot-title-line">
             <text class="item-name">{{ spot.name }}</text>
@@ -170,6 +168,7 @@
 <script>
 import { get } from '@/utils/request'
 import { formatLocationText, getLocationErrorMessage, requestCurrentLocation, saveLocation } from '@/utils/location'
+import { getSpotImage } from '@/utils/spot-images'
 
 const DEFAULT_LOCATION = {
   latitude: 31.42892,
@@ -474,7 +473,8 @@ export default {
         walkTime: spot.walkTime,
         provider: spot.provider,
         type,
-        typeLabel: spotTypeLabels[type] || '景点'
+        typeLabel: spotTypeLabels[type] || '景点',
+        image: getSpotImage(name)
       }
     },
     inferSpotType(name) {
@@ -650,6 +650,14 @@ export default {
       })
     },
     goToGuide(id) {
+      uni.navigateTo({ url: `/pages/spot-detail/index?spot_id=${id}` })
+    },
+    openSpotDetail(spot) {
+      const id = Number(spot?.id || spot?.spot_id)
+      if (!Number.isFinite(id) || id <= 0) {
+        uni.showToast({ title: '暂无景点详情', icon: 'none' })
+        return
+      }
       uni.navigateTo({ url: `/pages/spot-detail/index?spot_id=${id}` })
     }
   }
@@ -1013,8 +1021,7 @@ export default {
   border-bottom: none;
 }
 
-.service-icon,
-.spot-thumb {
+.service-icon {
   width: 74rpx;
   height: 74rpx;
   flex-shrink: 0;
@@ -1026,6 +1033,16 @@ export default {
   color: #fff7e6;
   font-size: 26rpx;
   font-weight: 850;
+}
+
+.spot-thumb {
+  width: 112rpx;
+  height: 86rpx;
+  flex-shrink: 0;
+  margin-right: 20rpx;
+  border-radius: 12rpx;
+  background: #efe0bd;
+  box-shadow: 0 6rpx 16rpx rgba(66, 42, 23, 0.12);
 }
 
 .service-parking,
