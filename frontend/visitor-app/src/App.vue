@@ -7,6 +7,16 @@ export default {
     }
     const launchCount = Number(uni.getStorageSync('appLaunchCount') || 0)
     uni.setStorageSync('appLaunchCount', launchCount + 1)
+    
+    const userInfo = uni.getStorageSync('user_info')
+    if (userInfo) {
+      try {
+        const parsed = JSON.parse(userInfo)
+        uni.setStorageSync('userId', parsed.id)
+      } catch (e) {
+        uni.removeStorageSync('user_info')
+      }
+    }
   },
   onShow() {},
   onHide() {}

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, AsyncGenerator
 import httpx
 import os
 import base64
@@ -10,10 +11,12 @@ import json
 import datetime
 import re
 import asyncio
+import time
 import websockets
 from urllib.parse import urlparse, urlencode
 from email.utils import formatdate
 from app.database import get_db
+from app.utils.streaming import IntentStreamFilter
 from sqlalchemy.orm import Session
 
 from dotenv import load_dotenv
@@ -57,6 +60,31 @@ TTS_API_SECRET = os.getenv("TTS_API_SECRET", "")
 
 QWEN_API_URL = "https://apihub.agnes-ai.com/v1/chat/completions"
 QWEN_MODEL = "agnes-2.0-flash"
+AGNES_STREAM_CONNECT_TIMEOUT = max(0.5, float(os.getenv("AGNES_STREAM_CONNECT_TIMEOUT", "1.5")))
+AGNES_STREAM_READ_TIMEOUT = max(3.0, float(os.getenv("AGNES_STREAM_READ_TIMEOUT", "8.0")))
+AGNES_CIRCUIT_FAILURE_THRESHOLD = max(1, int(os.getenv("AGNES_CIRCUIT_FAILURE_THRESHOLD", "2")))
+AGNES_CIRCUIT_OPEN_SECONDS = max(10, int(os.getenv("AGNES_CIRCUIT_OPEN_SECONDS", "60")))
+
+_AGNES_FAILURE_COUNT = 0
+_AGNES_BLOCKED_UNTIL = 0.0
+
+
+def agnes_circuit_is_open() -> bool:
+    return time.monotonic() < _AGNES_BLOCKED_UNTIL
+
+
+def record_agnes_success() -> None:
+    global _AGNES_FAILURE_COUNT, _AGNES_BLOCKED_UNTIL
+    _AGNES_FAILURE_COUNT = 0
+    _AGNES_BLOCKED_UNTIL = 0.0
+
+
+def record_agnes_failure(reason: str) -> None:
+    global _AGNES_FAILURE_COUNT, _AGNES_BLOCKED_UNTIL
+    _AGNES_FAILURE_COUNT += 1
+    if _AGNES_FAILURE_COUNT >= AGNES_CIRCUIT_FAILURE_THRESHOLD:
+        _AGNES_BLOCKED_UNTIL = time.monotonic() + AGNES_CIRCUIT_OPEN_SECONDS
+        print(f"[AI] Agnes circuit opened for {AGNES_CIRCUIT_OPEN_SECONDS}s: {reason}")
 
 SERVICE_INTENT_MAP = {
     "ticket": {"name": "购票", "path": "/pages/ticket-assistant/index", "keywords": ["门票", "购票", "票价", "买票", "票", "多少钱"], "icon": "🎫"},
@@ -193,9 +221,15 @@ def parse_service_intent(content: str) -> dict:
     try:
         intent_str = intent_match.group(1).strip()
         intent_data = json.loads(intent_str)
+        service = intent_data.get("service")
+        if service not in SERVICE_INTENT_MAP:
+            service = None
+        params = intent_data.get("params")
+        if not isinstance(params, dict):
+            params = {}
         return {
-            "service": intent_data.get("service"),
-            "params": intent_data.get("params", {})
+            "service": service,
+            "params": params,
         }
     except Exception as e:
         print(f"[INTENT] 解析意图失败: {str(e)}")
@@ -264,22 +298,31 @@ async def qwen_inference(text: str, user_id: str, knowledge: str = "", rag_resul
     payload = {
         "model": QWEN_MODEL,
         "messages": messages,
-        "max_tokens": 768
+        "max_tokens": 512
     }
 
     print(f"[AI] 开始调用Agnes AI: {text[:50]}...")
     print(f"[AI] API URL: {QWEN_API_URL}")
-    print(f"[AI] API Key: {AI_API_KEY[:20]}...")
     print(f"[AI] Knowledge: {knowledge[:100]}...")
 
-    max_retries = 3
-    retry_delay = 2
+    max_retries = 0 if agnes_circuit_is_open() else 1
 
     for attempt in range(max_retries):
         try:
-            response = await ai_client.post(QWEN_API_URL, headers=headers, json=payload)
+            response = await ai_client.post(
+                QWEN_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=httpx.Timeout(
+                    connect=AGNES_STREAM_CONNECT_TIMEOUT,
+                    read=AGNES_STREAM_READ_TIMEOUT,
+                    write=AGNES_STREAM_READ_TIMEOUT,
+                    pool=AGNES_STREAM_CONNECT_TIMEOUT,
+                ),
+            )
             print(f"[AI] Agnes AI状态码: {response.status_code}")
             response.raise_for_status()
+            record_agnes_success()
             result = response.json()
             print(f"[AI] Agnes AI返回: {json.dumps(result)[:200]}...")
             content = result["choices"][0]["message"]["content"]
@@ -300,14 +343,11 @@ async def qwen_inference(text: str, user_id: str, knowledge: str = "", rag_resul
             }
         except httpx.TimeoutException:
             print(f"[AI] Agnes AI超时(第{attempt+1}/{max_retries}次)")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
         except httpx.HTTPStatusError as e:
             print(f"[AI] Agnes AI HTTP错误: {str(e)}")
-            if response.status_code in [500, 502, 503, 504] and attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
-            else:
-                break
+            if response.status_code in [500, 502, 503, 504]:
+                record_agnes_failure(f"HTTP {response.status_code}")
+            break
         except Exception as e:
             print(f"[AI] Agnes AI调用失败: {str(e)}")
             break
@@ -382,6 +422,52 @@ async def local_fallback_inference(text: str):
         }
     }
 
+def clean_knowledge_fallback_text(content: str) -> str:
+    """Strip retrieval metadata before exposing a knowledge result to users."""
+    if not content:
+        return ""
+
+    raw = str(content).replace("\r\n", "\n").strip()
+    lines = [line.strip() for line in raw.split("\n") if line.strip()]
+    body_lines = []
+    saw_content_marker = False
+    metadata_keys = ("source:", "title:", "score:", "retrieval_mode:")
+
+    for line in lines:
+        lowered = line.lower()
+        if lowered.startswith("content:"):
+            saw_content_marker = True
+            value = line.split(":", 1)[1].strip()
+            if value:
+                body_lines.append(value)
+            continue
+        if saw_content_marker:
+            if lowered.startswith(metadata_keys):
+                continue
+            body_lines.append(line)
+            continue
+        if lowered.startswith(metadata_keys):
+            continue
+        body_lines.append(line)
+
+    cleaned = "\n".join(body_lines).strip()
+    return cleaned or raw
+
+def is_reliable_fallback_result(result: dict) -> bool:
+    if not isinstance(result, dict):
+        return False
+    confidence = result.get("confidence")
+    if confidence is not None:
+        try:
+            return float(confidence) >= 0.45
+        except (TypeError, ValueError):
+            return False
+    try:
+        # Semantic scores close to zero are not useful enough to answer directly.
+        return float(result.get("score", 0)) >= 0.15
+    except (TypeError, ValueError):
+        return False
+
 async def knowledge_fallback_inference(text: str, rag_results: list = None):
     if rag_results and len(rag_results) > 0:
         best_result = rag_results[0]
@@ -390,7 +476,7 @@ async def knowledge_fallback_inference(text: str, rag_results: list = None):
         
         print(f"[AI] 使用知识库降级方案，匹配分数: {score}")
         
-        if score > 0 and len(content) > 20:
+        if is_reliable_fallback_result(best_result) and len(content) > 20:
             lines = content.split("\n")
             answer_lines = []
             for line in lines:
@@ -413,9 +499,10 @@ async def knowledge_fallback_inference(text: str, rag_results: list = None):
                     }
                 }
             
-            print(f"[AI] 知识库内容直接回答: {content[:50]}...")
+            cleaned_content = clean_knowledge_fallback_text(content)
+            print(f"[AI] 知识库内容直接回答: {cleaned_content[:50]}...")
             return {
-                "text": content,
+                "text": cleaned_content,
                 "confidence": 0.6,
                 "debug": {
                     "source": "knowledge_fallback",
@@ -426,6 +513,17 @@ async def knowledge_fallback_inference(text: str, rag_results: list = None):
             }
     
     print(f"[AI] 知识库无匹配，使用关键词降级方案")
+    if (text or "").strip() not in {"你好", "您好", "嗨", "谢谢", "感谢"}:
+        return {
+            "text": "抱歉，我暂时没有检索到足够可靠的信息，请换一种问法，或查看景区服务页面。",
+            "confidence": 0.0,
+            "debug": {
+                "source": "knowledge_fallback_unreliable",
+                "rag_hit_count": len(rag_results or []),
+                "rag_hits": summarize_rag_results(rag_results),
+            },
+        }
+
     fallback = await local_fallback_inference(text)
     return {
         **fallback,
@@ -696,3 +794,237 @@ async def rag_retrieval(request: RAGRequest, db: Session = Depends(get_db)):
         return {"documents": [r["content"] for r in res], "scores": [r["score"] for r in res]}
     except:
         return {"documents": [], "scores": []}
+
+# ======================
+# 流式推理
+# ======================
+async def qwen_stream_inference(text: str, user_id: str, knowledge: str = "", rag_results: list = None, emotion: str = "neutral", emotion_reason: str = "", history: list = None) -> AsyncGenerator[str, None]:
+    headers = {
+        "Authorization": f"Bearer {AI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    emotion_prompt = f""
+    if emotion and emotion != "neutral":
+        emotion_desc = {
+            "positive": "开心",
+            "negative": "难过/焦虑",
+            "surprised": "惊讶",
+            "shy": "害羞",
+            "angry": "生气"
+        }.get(emotion, emotion)
+        reason_part = f"，原因：{emotion_reason}" if emotion_reason else ""
+        emotion_prompt = f"当前游客情绪：{emotion_desc}{reason_part}。请根据情绪调整回应方式。\n\n"
+
+    if knowledge:
+        user_prompt = f"{emotion_prompt}参考信息：\n{knowledge}\n\n问题：{text}"
+    else:
+        user_prompt = f"{emotion_prompt}知识库中未检索到相关信息，请根据你自身的知识回答：{text}"
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT}
+    ]
+
+    if history and isinstance(history, list):
+        recent_history = history[-6:]
+        for h in recent_history:
+            if h.get("role") in ["user", "assistant"]:
+                messages.append({
+                    "role": h["role"],
+                    "content": h.get("content", "")[:200]
+                })
+
+    messages.append({"role": "user", "content": user_prompt})
+
+    payload = {
+        "model": QWEN_MODEL,
+        "messages": messages,
+        "max_tokens": 512,
+        "stream": True
+    }
+
+    print(f"[AI] 开始流式调用Agnes AI: {text[:50]}...")
+
+    max_retries = 0 if agnes_circuit_is_open() else 1
+    if max_retries == 0:
+        print("[AI] Agnes circuit is open; skipping remote stream call")
+    stream_timeout = httpx.Timeout(
+        connect=AGNES_STREAM_CONNECT_TIMEOUT,
+        read=AGNES_STREAM_READ_TIMEOUT,
+        write=AGNES_STREAM_READ_TIMEOUT,
+        pool=AGNES_STREAM_CONNECT_TIMEOUT,
+    )
+    partial_content = ""
+    request_started_at = time.perf_counter()
+    first_token_logged = False
+
+    for attempt in range(max_retries):
+        try:
+            async with ai_client.stream(
+                "POST",
+                QWEN_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=stream_timeout,
+            ) as response:
+                print(f"[AI] Agnes AI流式状态码: {response.status_code}")
+                response.raise_for_status()
+
+                full_content = ""
+                buffer = ""
+                stream_done = False
+                intent_filter = IntentStreamFilter()
+                async for chunk in response.aiter_text():
+                    if stream_done:
+                        break
+
+                    buffer += chunk
+
+                    while True:
+                        line_end = buffer.find("\n")
+                        if line_end == -1:
+                            break
+
+                        line = buffer[:line_end].strip()
+                        buffer = buffer[line_end + 1:]
+
+                        if not line:
+                            continue
+
+                        if line.startswith("data: "):
+                            data_str = line[6:]
+                            if data_str == "[DONE]":
+                                buffer = ""
+                                stream_done = True
+                                break
+                            try:
+                                data = json.loads(data_str)
+
+                                choices = data.get("choices")
+                                if not choices or not isinstance(choices, list) or len(choices) == 0:
+                                    finish_reason = data.get("finish_reason")
+                                    if finish_reason:
+                                        print(f"[AI] 流式响应结束标记: finish_reason={finish_reason}")
+                                        continue
+                                    print(f"[AI] 流式响应无choices: {json.dumps(data)[:100]}")
+                                    continue
+
+                                first_choice = choices[0]
+                                if not isinstance(first_choice, dict):
+                                    print(f"[AI] 流式响应choice格式异常: {type(first_choice)}")
+                                    continue
+
+                                delta = first_choice.get("delta")
+                                if delta is None:
+                                    finish_reason = first_choice.get("finish_reason")
+                                    if finish_reason:
+                                        print(f"[AI] 流式响应单个结束标记: finish_reason={finish_reason}")
+                                        continue
+                                    print(f"[AI] 流式响应无delta: {json.dumps(first_choice)[:100]}")
+                                    continue
+
+                                content = delta.get("content", "")
+                                if content:
+                                    if not first_token_logged:
+                                        first_token_logged = True
+                                        print(
+                                            f"[AI] Agnes first-token latency: "
+                                            f"{time.perf_counter() - request_started_at:.2f}s"
+                                        )
+                                    full_content += content
+                                    partial_content = full_content
+                                    clean_content = intent_filter.feed(content)
+                                    if clean_content:
+                                        yield clean_content
+                            except json.JSONDecodeError as e:
+                                print(f"[AI] 流式响应JSON解析失败: {data_str[:150]} - {str(e)}")
+                                continue
+                            except Exception as e:
+                                print(f"[AI] 流式响应处理异常: {str(e)} - {data_str[:100]}")
+                                continue
+
+                trailing_content = intent_filter.finish()
+                if trailing_content:
+                    yield trailing_content
+
+                if full_content:
+                    record_agnes_success()
+                    meta_data = {
+                        'intent': parse_service_intent(full_content),
+                        'debug': {
+                            'source': 'qwen_rag_stream',
+                            'knowledge_used': bool(knowledge.strip() if isinstance(knowledge, str) else knowledge),
+                            'rag_hit_count': len(rag_results or []),
+                            'rag_hits': summarize_rag_results(rag_results),
+                        }
+                    }
+                    yield f"__STREAM_META__{json.dumps(meta_data)}__STREAM_META__"
+                    return
+
+            print(f"[AI] Agnes AI流式调用失败，尝试降级方案")
+        except httpx.TimeoutException:
+            print(f"[AI] Agnes AI流式超时(第{attempt+1}/{max_retries}次)")
+            record_agnes_failure("stream timeout")
+            if partial_content:
+                yield f"__STREAM_META__{json.dumps({'intent': {'service': None, 'params': {}}, 'debug': {'source': 'qwen_partial_timeout'}})}__STREAM_META__"
+                return
+        except httpx.HTTPStatusError as e:
+            print(f"[AI] Agnes AI流式HTTP错误: {str(e)}")
+            if e.response.status_code in [500, 502, 503, 504]:
+                record_agnes_failure(f"HTTP {e.response.status_code}")
+            break
+        except Exception as e:
+            print(f"[AI] Agnes AI流式调用失败: {str(e)}")
+            break
+
+    print(f"[AI] Agnes AI流式调用失败，使用降级方案")
+    fallback_result = await knowledge_fallback_inference(text, rag_results)
+    yield fallback_result["text"]
+    meta_data = {
+        'intent': {'service': None, 'params': {}},
+        'debug': {
+            **fallback_result.get('debug', {}),
+            'source': 'knowledge_fallback_stream',
+        }
+    }
+    yield f"__STREAM_META__{json.dumps(meta_data)}__STREAM_META__"
+
+async def ai_stream_inference(request: AIRequest, db: Session = Depends(get_db)) -> AsyncGenerator[str, None]:
+    text = request.text.strip()
+
+    from app.services.knowledge_service import KnowledgeService
+    ks = KnowledgeService()
+    ks.sync_from_database(db)
+
+    rag_results = ks.search(text, top_k=3)
+
+    knowledge = ""
+    if rag_results:
+        knowledge = "\n\n".join([f"【来源{idx+1}】\n{r['content']}" for idx, r in enumerate(rag_results)])
+
+    async for chunk in qwen_stream_inference(
+        text=text,
+        user_id=request.user_id,
+        knowledge=knowledge,
+        rag_results=rag_results,
+        emotion=request.emotion,
+        emotion_reason=request.emotion_reason,
+        history=request.history
+    ):
+        yield chunk
+
+@router.post("/stream-inference")
+async def stream_inference(request: AIRequest, db: Session = Depends(get_db)):
+    async def generate():
+        async for chunk in ai_stream_inference(request, db):
+            yield f"data: {json.dumps({'content': chunk})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*"
+        }
+    )

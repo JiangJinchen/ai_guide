@@ -94,16 +94,16 @@
     <view class="section">
       <view class="section-head">
         <text class="section-title">热门景点</text>
-        <text class="section-more" @click="goToGuideList">全部景点</text>
+        <text class="section-more" @click="goToGuideList">更多</text>
       </view>
       <view class="hot-grid">
         <view
           class="hot-card"
           v-for="(spot, index) in hotSpots"
           :key="spot.id"
-          :class="'spot-tone-' + (index % 4)"
           @click="goToGuide(spot.id)"
         >
+          <image class="hot-image" :src="spotImages[spot.name] || defaultImage" mode="aspectFill" />
           <view class="hot-overlay"></view>
           <view class="hot-content">
             <text class="hot-name">{{ spot.name }}</text>
@@ -158,6 +158,56 @@ const fallbackSpots = [
   { id: 4, name: '五印坛城', summary: '藏传佛教文化空间，色彩绚丽，适合游览打卡。' }
 ]
 
+import imgLingshandaf from '@/static/images/灵山大佛.jpg'
+import imgLingshanfangong from '@/static/images/灵山梵宫.jpg'
+import imgJiulongguanyu from '@/static/images/九龙灌浴.jpg'
+import imgWuyintancheng from '@/static/images/五印坛城.jpg'
+import imgBaiziximile from '@/static/images/百子戏弥勒.jpg'
+import imgXiangfuchensi from '@/static/images/祥符禅寺.jpg'
+import imgAyuwangzhu from '@/static/images/阿育王柱.jpg'
+import imgWuzhimen from '@/static/images/五智门.jpg'
+import imgFoztan from '@/static/images/佛足坛.jpg'
+import imgPutiAvenue from '@/static/images/菩提大道.jpg'
+import imgXiangmofudiao from '@/static/images/降魔浮雕.jpg'
+import imgNianhuaguangchang from '@/static/images/拈花广场.jpg'
+import imgFantianhuahai from '@/static/images/梵天花海.jpg'
+import imgWudengHu from '@/static/images/五灯湖.jpg'
+import imgLumingGu from '@/static/images/鹿鸣谷.jpg'
+import imgManfeilongta from '@/static/images/曼飞龙塔.jpg'
+import imgLingshanshengjing from '@/static/images/灵山胜境.jpg'
+import imgFojiawenhua from '@/static/images/佛教文化博览馆.jpg'
+import imgWujiyizhai from '@/static/images/无尽意斋.jpg'
+import imgYoukezhongxin from '@/static/images/游客中心.jpg'
+import imgLingshandaZhaoBi from '@/static/images/灵山大照壁.jpg'
+import imgXiangyueHuajie from '@/static/images/香月花街.jpg'
+import imgNianhuatang from '@/static/images/拈花堂.jpg'
+
+const SPOT_IMAGES = {
+  '灵山大佛': imgLingshandaf,
+  '灵山梵宫': imgLingshanfangong,
+  '九龙灌浴': imgJiulongguanyu,
+  '五印坛城': imgWuyintancheng,
+  '百子戏弥勒': imgBaiziximile,
+  '祥符禅寺': imgXiangfuchensi,
+  '阿育王柱': imgAyuwangzhu,
+  '五智门': imgWuzhimen,
+  '佛足坛': imgFoztan,
+  '菩提大道': imgPutiAvenue,
+  '降魔浮雕': imgXiangmofudiao,
+  '拈花广场': imgNianhuaguangchang,
+  '梵天花海': imgFantianhuahai,
+  '五灯湖': imgWudengHu,
+  '鹿鸣谷': imgLumingGu,
+  '曼飞龙塔': imgManfeilongta,
+  '灵山胜境': imgLingshanshengjing,
+  '佛教文化博览馆': imgFojiawenhua,
+  '无尽意斋': imgWujiyizhai,
+  '灵山胜境游客中心': imgYoukezhongxin,
+  '灵山大照壁': imgLingshandaZhaoBi,
+  '香月花街': imgXiangyueHuajie,
+  '拈花堂': imgNianhuatang
+}
+
 export default {
   data() {
     return {
@@ -165,6 +215,8 @@ export default {
       activeHero: 0,
       activeService: 'student',
       spots: fallbackSpots,
+      spotImages: SPOT_IMAGES,
+      defaultImage: imgLingshanshengjing,
       /*
       heroSlides: [
         { kicker: '鏃犻敗 澶箹 鐏靛北', title: '涓€鏃ュ叆鑳滃', desc: '娌垮北姘淬€佷經鍏変笌姊甸煶锛屾參娓哥伒灞便€? },
@@ -399,7 +451,7 @@ export default {
       uni.navigateTo({ url: '/pages/guide/index' })
     },
     goToGuide(id) {
-      uni.navigateTo({ url: `/pages/guide/index?spot_id=${id}` })
+      uni.navigateTo({ url: `/pages/spot-detail/index?spot_id=${id}` })
     },
     openActivityList(type = 'performance') {
       uni.navigateTo({ url: `/pages/activity-service/index?type=${type}` })
@@ -813,33 +865,14 @@ export default {
   min-height: 250rpx;
   overflow: hidden;
   border-radius: 10rpx;
-  background-size: cover;
-  background-position: center;
   box-shadow: 0 16rpx 34rpx rgba(68, 39, 22, 0.14);
 }
 
-.spot-tone-0 {
-  background:
-    linear-gradient(140deg, rgba(75, 33, 24, 0.1), rgba(15, 50, 44, 0.35)),
-    linear-gradient(135deg, #743327, #d8ad64);
-}
-
-.spot-tone-1 {
-  background:
-    linear-gradient(140deg, rgba(42, 31, 23, 0.18), rgba(133, 40, 32, 0.26)),
-    linear-gradient(135deg, #34483f, #c99455);
-}
-
-.spot-tone-2 {
-  background:
-    linear-gradient(140deg, rgba(80, 27, 24, 0.1), rgba(33, 65, 75, 0.38)),
-    linear-gradient(135deg, #884433, #e2c17a);
-}
-
-.spot-tone-3 {
-  background:
-    linear-gradient(140deg, rgba(32, 51, 51, 0.14), rgba(98, 43, 30, 0.32)),
-    linear-gradient(135deg, #285263, #d4a04f);
+.hot-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
 }
 
 .hot-overlay {

@@ -49,7 +49,7 @@
     <view class="condition-panel">
       <view class="section-head">
         <text class="section-title">我有多少时间</text>
-        <text class="section-note">用于控制选点数量</text>
+        <text class="section-note">用于控制选择的景点数</text>
       </view>
       <view class="time-row">
         <text
@@ -90,12 +90,12 @@
       <view class="spot-grid">
         <view
           class="spot-option"
-          :class="{ selected: selectedSpots.includes(spot.id) }"
+          :class="{ selected: isSpotSelected(spot) }"
           v-for="spot in allSpots"
-          :key="spot.id"
-          @click="toggleSpot(spot.id)"
+          :key="spot.id || spot.spot_id || spot.spot_name"
+          @click="toggleSpot(spot)"
         >
-          <view class="check-dot">{{ selectedSpots.includes(spot.id) ? '✓' : '' }}</view>
+          <view class="check-dot">{{ isSpotSelected(spot) ? '✓' : '' }}</view>
           <view class="spot-copy">
             <text class="spot-name">{{ spot.spot_name || spot.name }}</text>
             <text class="spot-desc">{{ spot.location || spot.description || '灵山胜境景区内' }}</text>
@@ -193,7 +193,6 @@
             <view class="location-check">{{ isLocationActive(spot) ? '✓' : '' }}</view>
             <view class="location-info">
               <text class="location-name">{{ spot.spot_name || spot.name }}</text>
-              <text class="location-coord">{{ formatCoordinate(spot.latitude) }}，{{ formatCoordinate(spot.longitude) }}</text>
             </view>
           </view>
           <view class="empty-state" v-if="allSpots.length === 0">
@@ -241,10 +240,10 @@ export default {
         { label: '礼佛祈福', value: 'blessing' }
       ],
       durationOptions: [
-        { label: '30min', value: 30 },
         { label: '1h', value: 60 },
-        { label: '1.5h', value: 90 },
-        { label: '2h+', value: 150 }
+        { label: '2h', value: 120 },
+        { label: '3h', value: 180 },
+        { label: '4h+', value: 240 }
       ],
       travelOptions: [
         { label: '步行', value: 'walking' },
@@ -260,13 +259,13 @@ export default {
     statusTitle() {
       if (this.locationStatus === 'idle') return '尚未定位'
       if (this.locationStatus === 'loading') return '正在获取当前位置'
-      if (this.locationStatus === 'success') return '已锁定生成起点'
+      if (this.locationStatus === 'success') return '已获取生成起点'
       return '定位暂不可用'
     },
     statusDescription() {
       if (this.locationStatus === 'idle') return '点击手动定位后，会以真实当前位置作为路线起点。'
       if (this.locationStatus === 'loading') return '路线生成会以定位成功时的位置作为起点。'
-      if (this.locationStatus === 'success') return `当前起点 ${this.locationMessage}`
+      if (this.locationStatus === 'success') return `${this.locationMessage}`
       return this.locationMessage || '可继续生成路线，或稍后手动定位后重新规划。'
     },
     resultNote() {
@@ -279,7 +278,8 @@ export default {
   },
   methods: {
     userId() {
-      return uni.getStorageSync('userId') || 'guest'
+      const value = uni.getStorageSync('userId')
+      return value === null || value === undefined || value === '' ? 'guest' : String(value)
     },
     async loadAllSpots() {
       try {
@@ -316,32 +316,50 @@ export default {
         this.selectedPreferences.push(value)
       }
     },
-    toggleSpot(id) {
-      const index = this.selectedSpots.indexOf(id)
+    resolveSpotId(spot) {
+      const rawId = spot?.id ?? spot?.spot_id
+      const intId = Number.parseInt(rawId, 10)
+      return Number.isFinite(intId) && intId > 0 ? intId : null
+    },
+    isSpotSelected(spot) {
+      const id = this.resolveSpotId(spot)
+      return id ? this.selectedSpots.includes(id) : false
+    },
+    toggleSpot(spot) {
+      const intId = this.resolveSpotId(spot)
+      if (!intId) return
+      const index = this.selectedSpots.indexOf(intId)
       if (index > -1) {
         this.selectedSpots.splice(index, 1)
       } else {
-        this.selectedSpots.push(id)
+        this.selectedSpots.push(intId)
       }
     },
     async generateRoutes() {
       uni.showLoading({ title: '生成路线中...' })
       try {
-        const res = await post('/routes/generate', {
-          user_id: this.userId(),
+        const mustSpotIds = this.selectedSpots
+          .map(item => Number.parseInt(item, 10))
+          .filter(item => Number.isFinite(item) && item > 0)
+        const startSpotId = Number.parseInt(this.userLocation?.spot_id, 10)
+        const payload = {
+          user_id: String(this.userId()),
           preferences: this.selectedPreferences,
           duration_minutes: this.activeDuration,
           travel_mode: this.travelMode,
-          must_spot_ids: this.selectedSpots,
-          start_spot_id: this.userLocation?.spot_id,
-          latitude: this.userLocation?.latitude,
-          longitude: this.userLocation?.longitude
-        })
+          must_spot_ids: mustSpotIds,
+          start_spot_id: Number.isFinite(startSpotId) && startSpotId > 0 ? startSpotId : null,
+          latitude: Number.isFinite(Number(this.userLocation?.latitude)) ? Number(this.userLocation.latitude) : null,
+          longitude: Number.isFinite(Number(this.userLocation?.longitude)) ? Number(this.userLocation.longitude) : null
+        }
+        console.info('[route-planning] generateRoutes payload', payload)
+        const res = await post('/routes/generate', payload)
         this.routeOptions = res.routes || []
         if (!this.routeOptions.length) {
           uni.showToast({ title: '暂无可用路线', icon: 'none' })
         }
       } catch (e) {
+        console.error('[route-planning] generateRoutes failed', e, e?.data || e?.response?.data)
         uni.showToast({ title: '路线生成失败', icon: 'none' })
       } finally {
         uni.hideLoading()
@@ -350,8 +368,10 @@ export default {
     async openHistory() {
       this.showHistory = true
       try {
-        this.routeHistory = await get('/routes/history', { user_id: this.userId(), limit: 20 })
+        const userId = encodeURIComponent(String(this.userId()))
+        this.routeHistory = await get(`/routes/history?user_id=${userId}&limit=20`)
       } catch (e) {
+        console.warn('[route-planning] history load failed', e)
         this.routeHistory = []
       }
     },
@@ -388,6 +408,7 @@ export default {
       const latitude = Number(location.latitude)
       const longitude = Number(location.longitude)
       const name = location.spot_name || location.name || '景区景点'
+      const spotId = this.resolveSpotId(location)
       if (!latitude || !longitude) {
         uni.showToast({ title: '该景点暂无定位坐标', icon: 'none' })
         return
@@ -396,11 +417,11 @@ export default {
         latitude,
         longitude,
         name,
-        spot_id: location.id,
+        spot_id: spotId,
         source: 'manual'
       }
       this.locationStatus = 'success'
-      this.locationMessage = `${name} ${latitude.toFixed(5)}, ${longitude.toFixed(5)}`
+      this.locationMessage = `${name}`
       this.showLocationSelector = false
     },
     isLocationActive(location) {

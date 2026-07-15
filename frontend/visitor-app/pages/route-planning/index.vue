@@ -42,7 +42,7 @@
     <view class="condition-panel">
       <view class="section-head">
         <text class="section-title">我有多少时间</text>
-        <text class="section-note">用于控制选点数量</text>
+        <text class="section-note">用于控制选择的景点数</text>
       </view>
       <view class="time-row">
         <text
@@ -206,10 +206,10 @@ export default {
         { label: '礼佛祈福', value: 'blessing' }
       ],
       durationOptions: [
-        { label: '30min', value: 30 },
         { label: '1h', value: 60 },
-        { label: '1.5h', value: 90 },
-        { label: '2h+', value: 150 }
+        { label: '2h', value: 120 },
+        { label: '3h', value: 180 },
+        { label: '4h+', value: 240 }
       ],
       travelOptions: [
         { label: '步行', value: 'walking' },
@@ -225,7 +225,7 @@ export default {
     statusTitle() {
       if (this.locationStatus === 'idle') return '尚未定位'
       if (this.locationStatus === 'loading') return '正在获取当前位置'
-      if (this.locationStatus === 'success') return '已锁定生成起点'
+      if (this.locationStatus === 'success') return '已获取生成起点'
       return '定位暂不可用'
     },
     statusDescription() {
@@ -244,7 +244,8 @@ export default {
   },
   methods: {
     userId() {
-      return uni.getStorageSync('userId') || 'guest'
+      const value = uni.getStorageSync('userId')
+      return value === null || value === undefined || value === '' ? 'guest' : String(value)
     },
     async loadAllSpots() {
       try {
@@ -289,20 +290,30 @@ export default {
     async generateRoutes() {
       uni.showLoading({ title: '生成路线中...' })
       try {
+        const selectedPreferences = Array.isArray(this.selectedPreferences) ? [...this.selectedPreferences] : []
+        const selectedSpots = Array.isArray(this.selectedSpots) ? [...this.selectedSpots] : []
+        const userLocation = this.userLocation || {}
         const res = await post('/routes/generate', {
-          user_id: this.userId(),
-          preferences: this.selectedPreferences,
+          user_id: String(this.userId()),
+          preferences: selectedPreferences,
           duration_minutes: this.activeDuration,
           travel_mode: this.travelMode,
-          must_spot_ids: this.selectedSpots,
-          latitude: this.userLocation?.latitude,
-          longitude: this.userLocation?.longitude
+          must_spot_ids: selectedSpots
+            .map(item => Number.parseInt(item, 10))
+            .filter(item => Number.isFinite(item) && item > 0),
+          start_spot_id: (() => {
+            const intId = Number.parseInt(userLocation.spot_id, 10)
+            return Number.isFinite(intId) && intId > 0 ? intId : null
+          })(),
+          latitude: Number.isFinite(Number(userLocation.latitude)) ? Number(userLocation.latitude) : null,
+          longitude: Number.isFinite(Number(userLocation.longitude)) ? Number(userLocation.longitude) : null
         })
         this.routeOptions = res.routes || []
         if (!this.routeOptions.length) {
           uni.showToast({ title: '暂无可用路线', icon: 'none' })
         }
       } catch (e) {
+        console.error('[route-planning] generateRoutes failed', e, e?.data || e?.response?.data)
         uni.showToast({ title: '路线生成失败', icon: 'none' })
       } finally {
         uni.hideLoading()
@@ -311,8 +322,10 @@ export default {
     async openHistory() {
       this.showHistory = true
       try {
-        this.routeHistory = await get('/routes/history', { user_id: this.userId(), limit: 20 })
+        const userId = encodeURIComponent(String(this.userId()))
+        this.routeHistory = await get(`/routes/history?user_id=${userId}&limit=20`)
       } catch (e) {
+        console.warn('[route-planning] history load failed', e)
         this.routeHistory = []
       }
     },

@@ -42,14 +42,12 @@
     <view class="action-bar">
       <button class="action-btn primary" @click="navigateFullRoute">导航全程</button>
       <button class="action-btn" @click="relocate">重新定位</button>
-      <button class="action-btn" @click="saveRoute">保存路线</button>
       <button class="action-btn" @click="shareRoute">分享路线</button>
     </view>
 
     <view class="route-summary">
       <text class="route-title">{{ routePlan.route_name }}</text>
       <text class="next-stop" v-if="routeSpots.length">当前下一站：{{ routeSpots[0].name }}</text>
-      <text class="route-desc">{{ routePlan.strategy || routePlan.description || '按官方游览顺序规避折返路线。' }}</text>
     </view>
 
     <view class="segment-list" v-if="routeSpots.length">
@@ -83,7 +81,12 @@
             <text class="segment-desc">{{ spot.description || '景区推荐游览点' }}</text>
           </view>
           <view class="segment-actions">
-            <text class="mini-btn" @click.stop="navigateToSpot(spot)">导航</text>
+            <div @click.stop="navigateToSpot(spot)">
+              <svg viewBox="0 0 1024 1024" width="24" height="24" fill="#814b00ff">
+                <path d="M906.000638 1023.99996a99.290887 99.290887 0 0 1-57.16748-18.052889L483.763632 746.186063l-55.161604 221.649355a40.11753 40.11753 0 0 1-39.114592 30.088147 40.11753 40.11753 0 0 1-39.114592-31.091086l-82.240937-352.031328a20.058765 20.058765 0 0 0-11.032321-14.041135L50.494306 504.477943l-5.014692-3.008815a100.293826 100.293826 0 0 1 18.052889-176.517133L886.944811 7.020568a100.293826 100.293826 0 0 1 136.399603 101.296764l-17.04995 821.406432v3.008815a99.290887 99.290887 0 0 1-58.170419 81.237998 100.293826 100.293826 0 0 1-42.123407 10.029383z m-11.03232-84.246814a20.058765 20.058765 0 0 0 31.091085-13.038197l17.049951-821.406432v-3.008815a20.058765 20.058765 0 0 0-27.079333-21.061703L92.617712 399.169426a20.058765 20.058765 0 0 0-6.017629 34.099901l203.596466 94.276196a99.290887 99.290887 0 0 1 55.161604 68.199801l45.132222 190.558269 29.085209-117.343776a40.11753 40.11753 0 0 1 62.182172-23.06758z"></path>
+                <path d="M389.487436 997.923565a40.11753 40.11753 0 0 1-27.079333-69.202739l191.561207-176.517134a40.11753 40.11753 0 0 1 54.158666 59.173358L416.566769 986.891244a40.11753 40.11753 0 0 1-27.079333 11.032321zM462.701929 714.092039a40.11753 40.11753 0 0 1-31.091086-65.190987L917.032959 42.123407a40.11753 40.11753 0 1 1 62.182172 50.146913L493.793015 699.047965a40.11753 40.11753 0 0 1-31.091086 15.044074z"></path>
+              </svg>
+            </div>
           </view>
           <view
             class="drag-handle"
@@ -311,11 +314,6 @@ export default {
           source: location.isFallback ? 'fallback' : 'current'
         }
         this.routeSpots = this.routeSpots.map(spot => ({ ...spot, style: this.pointStyle(spot) }))
-        if (this.routePlan) {
-          this.routePlan.start_location = this.userLocation
-          this.syncRoutePlan()
-          this.savedOnce = false
-        }
         return true
       } catch (e) {
         this.routeSpots = this.routeSpots.map(spot => ({ ...spot, style: this.pointStyle(spot) }))
@@ -717,7 +715,7 @@ export default {
 
       this.routeSpots = previewSpots.map(spot => ({ ...spot, style: this.pointStyle(spot) }))
       this.markManualOrderChanged()
-      this.syncRoutePlan()
+      this.syncRoutePlan(true)
       uni.showToast({ title: '游览顺序已更新', icon: 'none' })
     },
     cancelSpotDrag() {
@@ -756,7 +754,7 @@ export default {
       this.routeSpots = this.routeSpots.map(spot => ({ ...spot, style: this.pointStyle(spot) }))
       this.swipedIndex = null
       this.markManualOrderChanged()
-      this.syncRoutePlan()
+      this.syncRoutePlan(true)
     },
     removeSpotById(id) {
       const index = this.routeSpots.findIndex(item => item.id === id)
@@ -766,7 +764,7 @@ export default {
     addSpot(spot) {
       this.routeSpots.push({ ...spot, style: this.pointStyle(spot) })
       this.markManualOrderChanged()
-      this.syncRoutePlan()
+      this.syncRoutePlan(true)
       this.popupSpot = null
     },
     isInRoute(spot) {
@@ -775,18 +773,21 @@ export default {
     showSpotPopup(spot) {
       this.popupSpot = spot
     },
-    syncRoutePlan() {
-      const metrics = this.buildRouteMetrics()
+    syncRoutePlan(recalculate = false) {
+      const existingDistance = Number(this.routePlan?.total_distance)
+      const existingDuration = Number(this.routePlan?.total_duration)
+      const shouldRecalculate = recalculate || !Number.isFinite(existingDistance) || !Number.isFinite(existingDuration)
+      const metrics = shouldRecalculate ? this.buildRouteMetrics() : null
       this.routePlan = {
         ...this.routePlan,
         route: this.routeSpots,
         total_spots: this.routeSpots.length,
-        total_distance: metrics.total_distance,
-        total_duration: metrics.total_duration,
-        travel_duration: metrics.travel_duration,
-        walk_duration: metrics.walk_duration,
-        stay_duration: metrics.stay_duration,
-        segments: metrics.segments,
+        total_distance: shouldRecalculate ? metrics.total_distance : existingDistance,
+        total_duration: shouldRecalculate ? metrics.total_duration : existingDuration,
+        travel_duration: shouldRecalculate ? metrics.travel_duration : this.routePlan?.travel_duration,
+        walk_duration: shouldRecalculate ? metrics.walk_duration : this.routePlan?.walk_duration,
+        stay_duration: shouldRecalculate ? metrics.stay_duration : this.routePlan?.stay_duration,
+        segments: shouldRecalculate ? metrics.segments : this.routePlan?.segments,
         manual_order_changed: this.manualOrderChanged
       }
       if (!this.shareMode) {
@@ -885,12 +886,14 @@ export default {
         if (!silent) uni.showToast({ title: '路线已保存', icon: 'none' })
         return
       }
-      this.syncRoutePlan()
+      this.syncRoutePlan(false)
       try {
-        await post('/routes/history', { user_id: this.userId(), route: this.routePlan })
+        const payload = JSON.parse(JSON.stringify(this.routePlan || {}))
+        await post('/routes/history', { user_id: String(this.userId()), route: payload })
         this.savedOnce = true
         if (!silent) uni.showToast({ title: '路线已保存', icon: 'success' })
       } catch (e) {
+        console.error('[route-detail] saveRoute failed', e, e?.data || e?.response?.data)
         if (!silent) uni.showToast({ title: '保存失败', icon: 'none' })
       }
     },
@@ -963,7 +966,7 @@ export default {
         uni.showToast({ title: '\u6682\u65e0\u53ef\u5206\u4eab\u8def\u7ebf', icon: 'none' })
         return
       }
-      this.syncRoutePlan()
+      this.syncRoutePlan(false)
       const payload = await this.buildSharePayload()
 
       // #ifdef H5
@@ -996,7 +999,7 @@ export default {
       this.copyShareText(payload.text)
     },
     goToGuide(id) {
-      uni.navigateTo({ url: `/pages/guide/index?spot_id=${id}` })
+      uni.navigateTo({ url: `/pages/spot-detail/index?spot_id=${id}` })
     }
   }
 }
@@ -1146,8 +1149,8 @@ export default {
 
 .action-bar {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14rpx;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16rpx;
   padding: 22rpx 24rpx;
 }
 
@@ -1180,7 +1183,6 @@ export default {
 
 .route-title,
 .next-stop,
-.route-desc,
 .segment-name,
 .segment-meta,
 .segment-desc,
@@ -1193,13 +1195,6 @@ export default {
   color: #37251a;
   font-size: 34rpx;
   font-weight: bold;
-}
-
-.route-desc {
-  margin-top: 10rpx;
-  color: #8b7355;
-  font-size: 24rpx;
-  line-height: 1.5;
 }
 
 .next-stop {

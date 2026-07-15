@@ -14,7 +14,6 @@
       <view class="status-dot"></view>
       <view class="location-copy">
         <text class="location-title">{{ statusTitle }}</text>
-        <text class="location-desc">{{ statusDescription }}</text>
       </view>
       <text class="manual-btn" @click.stop="refreshLocation">手动定位</text>
     </view>
@@ -213,14 +212,7 @@ export default {
     statusTitle() {
       if (this.locationStatus === 'loading') return '正在获取您的实时位置'
       if (this.locationStatus === 'success') return '定位成功'
-      return '定位失败'
-    },
-    statusDescription() {
-      if (this.locationStatus === 'loading') return '正在获取您的实时位置，更新周边点位距离...'
-      if (this.locationStatus === 'success') {
-        return `当前位置 ${this.locationMessage}`
-      }
-      return '请检查定位授权，或走到开阔地段后手动刷新'
+      return '定位失败，请检查定位授权，或走到开阔地段后手动刷新'
     },
     mapCaption() {
       if (!this.hasLocation) return '地图已定位到灵山胜境游客中心，获取定位后会自动切换到您的当前位置'
@@ -505,7 +497,6 @@ export default {
 .page-title,
 .page-subtitle,
 .location-title,
-.location-desc,
 .section-title,
 .item-name,
 .item-meta,
@@ -582,13 +573,6 @@ export default {
   color: #4b2b1f;
   font-size: 28rpx;
   font-weight: 850;
-}
-
-.location-desc {
-  margin-top: 8rpx;
-  color: #7c6a57;
-  font-size: 23rpx;
-  line-height: 1.45;
 }
 
 .manual-btn {

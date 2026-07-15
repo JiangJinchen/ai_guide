@@ -189,7 +189,7 @@ export default {
       })
     },
     goToGuide(id) {
-      uni.navigateTo({ url: `/pages/guide/index?spot_id=${id}` })
+      uni.navigateTo({ url: `/pages/spot-detail/index?spot_id=${id}` })
     },
     goToFeedback() {
       uni.navigateTo({

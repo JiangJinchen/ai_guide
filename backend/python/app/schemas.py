@@ -63,7 +63,6 @@ class VisitorInteractionBase(BaseModel):
     interaction_type: Optional[str] = None
     content: Optional[str] = None
     emotion: Optional[str] = None
-    satisfaction_score: Optional[float] = None
 
 class VisitorInteractionCreate(VisitorInteractionBase):
     pass

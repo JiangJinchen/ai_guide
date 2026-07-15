@@ -7,23 +7,6 @@
       </view>
     </view>
 
-    <view class="section-block" v-if="Object.keys(userProfile).length > 0">
-      <view class="section-head">
-        <text class="section-title">您的游览偏好</text>
-      </view>
-      <view class="profile-tags">
-        <view 
-          class="profile-tag" 
-          v-for="(score, tag) in userProfile" 
-          :key="tag"
-          :style="{ opacity: score, backgroundColor: getTagColor(tag) }"
-        >
-          <text class="tag-name">{{ getTagLabel(tag) }}</text>
-          <text class="tag-score">{{ (score * 100).toFixed(0) }}%</text>
-        </view>
-      </view>
-    </view>
-
     <view class="section-block empty-block" v-if="recommendations.length === 0">
       <view class="section-head">
         <text class="section-title">推荐景点</text>
@@ -62,42 +45,63 @@
 
 <script>
 import { get } from '@/utils/request'
+import imgLingshandaf from '@/static/images/灵山大佛.jpg'
+import imgLingshanfangong from '@/static/images/灵山梵宫.jpg'
+import imgJiulongguanyu from '@/static/images/九龙灌浴.jpg'
+import imgWuyintancheng from '@/static/images/五印坛城.jpg'
+import imgBaiziximile from '@/static/images/百子戏弥勒.jpg'
+import imgXiangfuchensi from '@/static/images/祥符禅寺.jpg'
+import imgAyuwangzhu from '@/static/images/阿育王柱.jpg'
+import imgWuzhimen from '@/static/images/五智门.jpg'
+import imgFoztan from '@/static/images/佛足坛.jpg'
+import imgPutiAvenue from '@/static/images/菩提大道.jpg'
+import imgXiangmofudiao from '@/static/images/降魔浮雕.jpg'
+import imgNianhuaguangchang from '@/static/images/拈花广场.jpg'
+import imgFantianhuahai from '@/static/images/梵天花海.jpg'
+import imgWudengHu from '@/static/images/五灯湖.jpg'
+import imgLumingGu from '@/static/images/鹿鸣谷.jpg'
+import imgManfeilongta from '@/static/images/曼飞龙塔.jpg'
+import imgLingshanshengjing from '@/static/images/灵山胜境.jpg'
+import imgFojiawenhua from '@/static/images/佛教文化博览馆.jpg'
+import imgWujiyizhai from '@/static/images/无尽意斋.jpg'
+import imgYoukezhongxin from '@/static/images/游客中心.jpg'
+import imgLingshandaZhaoBi from '@/static/images/灵山大照壁.jpg'
+import imgXiangyueHuajie from '@/static/images/香月花街.jpg'
+import imgNianhuatang from '@/static/images/拈花堂.jpg'
 
 const SPOT_IMAGES = {
-  '灵山大佛': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Grand%20bronze%20Buddha%20statue%20on%20mountain%20scenic%20spot%20with%20blue%20sky&image_size=landscape_16_9',
-  '灵山梵宫': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Magnificent%20Buddhist%20palace%20architecture%20with%20golden%20roof%20and%20intricate%20designs&image_size=landscape_16_9',
-  '九龙灌浴': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Dynamic%20fountain%20show%20with%20nine%20dragons%20spraying%20water%20on%20Buddha%20statue&image_size=landscape_16_9',
-  '五印坛城': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Tibetan%20Buddhist%20mandala%20temple%20with%20colorful%20paintings%20and%20golden%20decoration&image_size=landscape_16_9',
-  '百子戏弥勒': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Bronze%20sculpture%20of%20Maitreya%20Buddha%20with%20hundreds%20of%20children%20playing%20around&image_size=landscape_16_9',
-  '祥符禅寺': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Ancient%20Buddhist%20temple%20with%20traditional%20Chinese%20architecture%20and%20incense&image_size=landscape_16_9',
-  '阿育王柱': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Ancient%20stone%20pillar%20with%20Buddhist%20carvings%20in%20scenic%20area&image_size=landscape_16_9',
-  '五明桥': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Traditional%20Chinese%20five%20arches%20bridge%20over%20lake%20with%20beautiful%20scenery&image_size=landscape_16_9',
-  '五智门': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Magnificent%20Chinese%20traditional%20gateway%20with%20carvings%20in%20Buddhist%20temple&image_size=landscape_16_9',
-  '佛足坛': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Buddhist%20footprint%20stones%20sculpture%20in%20temple%20garden&image_size=landscape_16_9',
-  '菩提大道': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Long%20avenue%20lined%20with%20bodhi%20trees%20leading%20to%20Buddhist%20temple&image_size=landscape_16_9',
-  '降魔浮雕': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Relief%20sculpture%20depicting%20Buddha%20overcoming%20demons%20in%20temple&image_size=landscape_16_9',
-  '拈花广场': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Beautiful%20square%20with%20flower%20sculpture%20in%20Buddhist%20scenic%20area&image_size=landscape_16_9',
-  '梵天花海': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Beautiful%20flower%20sea%20garden%20with%20colorful%20flowers%20near%20Buddhist%20temple&image_size=landscape_16_9',
-  '五灯湖': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Serene%20lake%20with%20lanterns%20in%20Chinese%20garden%20scenic%20spot&image_size=landscape_16_9',
-  '鹿鸣谷': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Peaceful%20valley%20with%20deer%20statues%20in%20mountain%20scenic%20area&image_size=landscape_16_9',
-  '曼飞龙塔': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Stupa%20pagoda%20with%20multiple%20spires%20in%20Buddhist%20scenic%20spot&image_size=landscape_16_9',
-  '灵山胜境': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Panoramic%20view%20of%20Lingshan%20Buddhist%20scenic%20area%20with%20mountains%20and%20lake&image_size=landscape_16_9',
-  '佛教文化博览馆': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Modern%20museum%20exhibiting%20Buddhist%20culture%20artifacts%20and%20history&image_size=landscape_16_9',
-  '无尽意斋': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Traditional%20Chinese%20tea%20house%20and%20meditation%20room%20in%20temple&image_size=landscape_16_9',
-  '灵山胜境游客中心': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Modern%20visitor%20center%20building%20in%20scenic%20area%20with%20glass%20facade&image_size=landscape_16_9',
-  '灵山大照壁': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Large%20traditional%20Chinese%20screen%20wall%20with%20Buddhist%20paintings&image_size=landscape_16_9',
-  '香月花街': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Traditional%20Chinese%20street%20with%20shops%20and%20flowers%20at%20night&image_size=landscape_16_9',
-  '拈花堂': 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Zen%20meditation%20hall%20with%20traditional%20Chinese%20architecture&image_size=landscape_16_9'
+  '灵山大佛': imgLingshandaf,
+  '灵山梵宫': imgLingshanfangong,
+  '九龙灌浴': imgJiulongguanyu,
+  '五印坛城': imgWuyintancheng,
+  '百子戏弥勒': imgBaiziximile,
+  '祥符禅寺': imgXiangfuchensi,
+  '阿育王柱': imgAyuwangzhu,
+  '五明桥': imgLingshanshengjing,
+  '五智门': imgWuzhimen,
+  '佛足坛': imgFoztan,
+  '菩提大道': imgPutiAvenue,
+  '降魔浮雕': imgXiangmofudiao,
+  '拈花广场': imgNianhuaguangchang,
+  '梵天花海': imgFantianhuahai,
+  '五灯湖': imgWudengHu,
+  '鹿鸣谷': imgLumingGu,
+  '曼飞龙塔': imgManfeilongta,
+  '灵山胜境': imgLingshanshengjing,
+  '佛教文化博览馆': imgFojiawenhua,
+  '无尽意斋': imgWujiyizhai,
+  '灵山胜境游客中心': imgYoukezhongxin,
+  '灵山大照壁': imgLingshandaZhaoBi,
+  '香月花街': imgXiangyueHuajie,
+  '拈花堂': imgNianhuatang
 }
 
-const DEFAULT_IMAGE = 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Beautiful%20Buddhist%20scenic%20spot%20landscape%20with%20mountains%20and%20temples&image_size=landscape_16_9'
+const DEFAULT_IMAGE = imgLingshanshengjing
 
 export default {
   data() {
     return {
-      recommendations: [],
-      userProfile: {},
-      preferredTags: []
+      recommendations: []
     }
   },
   onShow() {
@@ -109,8 +113,6 @@ export default {
         const userId = uni.getStorageSync('userId') || 'guest'
         const res = await get('/recommendation', { user_id: userId })
         const list = res.recommendations || res || []
-        this.userProfile = res.user_profile || {}
-        this.preferredTags = res.user_preferred_tags || []
         this.recommendations = list.map(item => ({
           spot_id: item.spot_id || item.id,
           spot_name: item.spot_name || item.name,
@@ -126,40 +128,16 @@ export default {
       }
     },
     goToGuide(id) {
-      uni.navigateTo({ url: `/pages/guide/index?spot_id=${id}` })
+      uni.navigateTo({ url: `/pages/spot-detail/index?spot_id=${id}` })
     },
     onImageError(e) {
-      e.target.style.display = 'none'
+      if (e.target && e.target.style) {
+        e.target.style.display = 'none'
+      }
     },
     getSpotImage(name) {
       return SPOT_IMAGES[name] || DEFAULT_IMAGE
     },
-    getTagLabel(tag) {
-      const labels = {
-        'zen_culture': '禅意文化',
-        'buddha_history': '佛教历史',
-        'architecture_art': '建筑艺术',
-        'buddha_performance': '佛教表演',
-        'lake_scenery': '湖景风光',
-        'parent_child': '亲子互动',
-        'ancient_temple': '古寺文化',
-        'leisure_service': '休闲服务'
-      }
-      return labels[tag] || tag
-    },
-    getTagColor(tag) {
-      const colors = {
-        'zen_culture': '#8c3228',
-        'buddha_history': '#a65c3e',
-        'architecture_art': '#37251a',
-        'buddha_performance': '#5a4a3a',
-        'lake_scenery': '#2d5a4a',
-        'parent_child': '#b8860b',
-        'ancient_temple': '#4a3728',
-        'leisure_service': '#6b4423'
-      }
-      return colors[tag] || '#8c3228'
-    }
   }
 }
 </script>
@@ -201,7 +179,7 @@ export default {
 
 .rec-card-block {
   position: relative;
-  margin: 0 30rpx 24rpx;
+  margin: 10rpx 30rpx 24rpx;
   min-height: 280rpx;
 }
 
@@ -216,36 +194,6 @@ export default {
   font-size: 32rpx;
   font-weight: bold;
   color: #37251a;
-}
-
-.section-count {
-  font-size: 26rpx;
-  color: #8b7355;
-}
-
-.profile-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16rpx;
-  padding: 0 30rpx 24rpx;
-}
-
-.profile-tag {
-  display: flex;
-  align-items: center;
-  padding: 12rpx 24rpx;
-  border-radius: 24rpx;
-  color: #fff8e8;
-}
-
-.tag-name {
-  font-size: 26rpx;
-  margin-right: 8rpx;
-}
-
-.tag-score {
-  font-size: 24rpx;
-  opacity: 0.9;
 }
 
 .empty-block {

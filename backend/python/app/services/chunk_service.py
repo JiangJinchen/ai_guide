@@ -6,12 +6,12 @@ from typing import Iterable
 
 from sqlalchemy.orm import Session
 
-from app.models import Knowledge, KnowledgeChunk, Spot
+from app.models import FAQItem, Knowledge, KnowledgeChunk, Spot
 from app.rag_config import get_chunk_overlap, get_chunk_size
 from app.services.retrieval_cache import clear_retrieval_cache
 
 
-SUPPORTED_SOURCE_TYPES = {"knowledge", "spot"}
+SUPPORTED_SOURCE_TYPES = {"knowledge", "spot", "faq"}
 SENTENCE_SPLIT_PATTERN = re.compile(
     r"(?<=[\u3002\uff01\uff1f.!?;\uff1b])|\n+"
 )
@@ -121,6 +121,16 @@ def iter_source_documents(db: Session) -> Iterable[SourceDocument]:
             title=spot.spot_name or "",
             body=body,
             metadata={"scenic_area_name": spot.scenic_area_name or ""},
+        )
+
+    for faq in db.query(FAQItem).filter(FAQItem.is_active.is_(True)).order_by(FAQItem.id.asc()).all():
+        body = f"question: {faq.question}\nanswer: {faq.answer}"
+        yield SourceDocument(
+            source_type="faq",
+            source_id=faq.id,
+            title=faq.question or "",
+            body=body,
+            metadata={"category": faq.category or "", "source_name": faq.source_name or ""},
         )
 
 

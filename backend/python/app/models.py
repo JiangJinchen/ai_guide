@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Text, DateTime, Boolean, Float, Date, UniqueConstraint
+from sqlalchemy import Column, String, Integer, Text, DateTime, Boolean, Float, Date, ForeignKey, UniqueConstraint
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -10,6 +10,83 @@ class Knowledge(Base):
     category = Column(String(100), index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class FAQItem(Base):
+    __tablename__ = "faq_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    question = Column(String(500), nullable=False)
+    answer = Column(Text, nullable=False)
+    category = Column(String(100), index=True)
+    sort_order = Column(Integer, default=100, index=True)
+    is_active = Column(Boolean, default=True, index=True)
+    source_name = Column(String(255))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class AdminRole(Base):
+    __tablename__ = "admin_roles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    role_key = Column(String(50), unique=True, nullable=False, index=True)
+    label = Column(String(100), nullable=False)
+    permissions = Column(Text, nullable=False, default="[]")
+    is_system = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class AdminUser(Base):
+    __tablename__ = "admin_users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(100), unique=True, nullable=False, index=True)
+    password_hash = Column(String(500), nullable=False)
+    display_name = Column(String(100), nullable=False)
+    role = Column(String(50), nullable=False, default="admin", index=True)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    last_login_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class AppUser(Base):
+    __tablename__ = "app_users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    phone = Column(String(20), unique=True, nullable=False, index=True)
+    nickname = Column(String(50), default="游客")
+    avatar_url = Column(String(255))
+    password_hash = Column(String(500))
+    openid = Column(String(64), index=True)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    last_login_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class AppUserSession(Base):
+    __tablename__ = "app_user_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    app_user_id = Column(Integer, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    refresh_token_hash = Column(String(64), unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    revoked_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class AdminSession(Base):
+    __tablename__ = "admin_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    admin_user_id = Column(Integer, ForeignKey("admin_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    refresh_token_hash = Column(String(64), unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    revoked_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class KnowledgeChunk(Base):
@@ -105,7 +182,6 @@ class VisitorInteraction(Base):
     content = Column(Text)
     reply_text = Column(Text)
     emotion = Column(String(50))
-    satisfaction_score = Column(Float)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class VisitorFeedback(Base):

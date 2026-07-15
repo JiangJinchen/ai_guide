@@ -204,11 +204,39 @@ export default {
         this.selectedTags.push(tag)
       }
     },
+    parseTags(rawTags) {
+      if (!rawTags) return []
+      if (typeof rawTags === 'string') {
+        try {
+          const parsed = JSON.parse(rawTags)
+          return Array.isArray(parsed) ? parsed : []
+        } catch (e) {
+          return rawTags.split(',').map(t => t.trim().replace(/['"]/g, ''))
+        }
+      }
+      if (Array.isArray(rawTags)) {
+        const firstTag = String(rawTags[0] || '')
+        if (firstTag.startsWith('[')) {
+          try {
+            const joined = rawTags.join(',')
+            const parsed = JSON.parse(joined)
+            return Array.isArray(parsed) ? parsed : []
+          } catch (e) {
+            return rawTags.map(t => String(t).replace(/['"\[\]]/g, '').trim()).filter(Boolean)
+          }
+        }
+        return rawTags.map(t => String(t).replace(/['"\[\]]/g, '').trim()).filter(Boolean)
+      }
+      return []
+    },
     async loadFeedbackRecords() {
       try {
         const userId = uni.getStorageSync('userId') || 'guest'
         const data = await get('/feedback/records', { user_id: userId, limit: 20 })
-        this.records = Array.isArray(data) ? data : []
+        this.records = (Array.isArray(data) ? data : []).map(r => ({
+          ...r,
+          tags: this.parseTags(r.tags)
+        }))
       } catch (e) {
         this.records = []
       }
@@ -236,7 +264,11 @@ export default {
         })
         markFeedbackSubmitted(this.feedbackType, this.targetKey)
         if (res && res.record) {
-          this.records = [res.record, ...this.records.filter(item => item.id !== res.record.id)]
+          const record = {
+            ...res.record,
+            tags: this.parseTags(res.record.tags)
+          }
+          this.records = [record, ...this.records.filter(item => item.id !== res.record.id)]
         }
         this.rating = 0
         this.comment = ''
@@ -390,6 +422,7 @@ export default {
 }
 
 .comment-input {
+  box-sizing: border-box;
   width: 100%;
   min-height: 230rpx;
   padding: 20rpx;

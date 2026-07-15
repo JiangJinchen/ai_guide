@@ -15,10 +15,12 @@
     <view class="stage">
       <view class="halo"></view>
       <DigitalHuman
+        :key="digitalHumanModelPath"
         ref="digitalHuman"
         class="stage-human"
         :status="status"
         :emotion="emotion"
+        :model-path="digitalHumanModelPath"
         @ready="onDigitalReady"
         @error="onDigitalError"
       />
@@ -158,6 +160,7 @@ import FeedbackModal from '@/components/FeedbackModal/index.vue'
 import { get, post } from '@/utils/request'
 import { requestCurrentLocation, getLocationErrorMessage } from '@/utils/location'
 import { promptForFeedback, markFeedbackPrompt, openFeedbackPage } from '@/utils/feedback'
+import { streamChat } from '@/utils/sse'
 
 export default {
   components: {
@@ -173,6 +176,9 @@ export default {
       emotion: 'neutral',
       scrollTop: 0,
       digitalReady: false,
+      digitalHumanModelPath: '/static/live2d/epsilon_ja/epsilon_free/runtime/Epsilon_free.model3.json',
+      digitalHumanVoice: 'female',
+      digitalHumanName: '灵山数字导游',
       audioElement: null,
       activeReplySeq: 0,
       isRecognizing: false,
@@ -184,6 +190,7 @@ export default {
       h5AudioChunks: [],
       h5InputSampleRate: 44100,
       voiceStartAt: 0,
+      currentSseClient: null,
       chatSessionId: '',
       chatQuestionCount: 0,
       chatSessionTimeoutMs: 20 * 60 * 1000,
@@ -261,11 +268,15 @@ export default {
   },
   onLoad(options) {
     this.ensureChatSession()
+    this.loadDigitalHumanConfig()
     if (options && options.history === 'true') this.loadHistory()
     this.initRecorder()
   },
   onShow() {
     this.isPageActive = true
+    this.$nextTick(() => {
+      if (this.$refs.digitalHuman) this.$refs.digitalHuman.ensureLive2D()
+    })
     if (uni.getStorageSync('openChatHistory')) {
       uni.removeStorageSync('openChatHistory')
       this.loadHistory()
@@ -273,7 +284,10 @@ export default {
   },
   onHide() {
     this.isPageActive = false
+    if (this.$refs.digitalHuman) this.$refs.digitalHuman.pauseRendering()
     this.showFeedbackModal = false
+    this.closeSseConnection()
+    this.stopCurrentSpeech()
   },
   onUnload() {
     this.isPageActive = false
@@ -281,8 +295,23 @@ export default {
     this.cleanupH5Recording()
     this.stopCurrentSpeech(false)
     this.showFeedbackModal = false
+    this.closeSseConnection()
   },
   methods: {
+    async loadDigitalHumanConfig() {
+      try {
+        const config = await get('/digital-human/config')
+        if (!config) return
+        if (config.model) this.digitalHumanModelPath = config.model
+        if (config.voice === 'male' || config.voice === 'female') this.digitalHumanVoice = config.voice
+        if (config.name) this.digitalHumanName = config.name
+        if (this.messages[0] && this.messages[0].role === 'assistant') {
+          this.messages[0].text = `您好，我是${this.digitalHumanName}。您可以按住说话，也可以输入文字，询问景点、路线、演出或祈福活动。`
+        }
+      } catch (error) {
+        // Keep the bundled model and default voice when the service is unavailable.
+      }
+    },
     createChatSessionId() {
       return `chat_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
     },
@@ -743,38 +772,93 @@ export default {
           longitude: options.location.longitude
         } : await this.getCurrentLocationForChat(text)
         this.touchChatSession()
-        const res = await post('/chat', { text, user_id: userId, session_id: sessionId, ...locationPayload })
-        if (replySeq !== this.activeReplySeq) return
-        
-        const answer = res.text || res.response || res.answer || '抱歉，我暂时没有检索到合适的讲解。'
-        const speechText = res.speech_text || answer
-        const replyId = res.reply_id || String(replySeq)
-        const userEmotion = res.emotion || this.emotion
-        const serviceActions = res.service_actions || []
-        const debugInfo = res.debug_info || {}
 
-        const emotionExpression = this.getExpressionForEmotion(userEmotion)
+        const assistantMsgIndex = this.messages.length
+        this.messages.push({ role: 'assistant', text: '', service_actions: [], debug_info: {} })
 
-        const digitalHuman = res.digital_human || {
-          action: res.digital_human_action,
-          expression: res.digital_human_expression || emotionExpression
+        let speechText = ''
+        let replyId = String(replySeq)
+        let userEmotion = 'neutral'
+        let digitalHumanConfig = {}
+        let leadSpeechText = ''
+        let leadSpeechPromise = null
+
+        const onMessage = (data) => {
+          if (replySeq !== this.activeReplySeq) return
+
+          if (data.type === 'content') {
+            this.messages[assistantMsgIndex].text = data.text
+            replyId = data.reply_id || replyId
+            this.status = 'speak'
+            this.scrollToBottom()
+          } else if (data.type === 'speech') {
+            const nextLeadText = String(data.text || '').trim()
+            if (nextLeadText && !leadSpeechPromise) {
+              leadSpeechText = nextLeadText
+              replyId = data.reply_id || replyId
+              leadSpeechPromise = this.trySpeak(
+                leadSpeechText,
+                replySeq,
+                `${replyId}_lead`
+              )
+            }
+          } else if (data.type === 'metadata') {
+            speechText = data.speech_text || this.messages[assistantMsgIndex].text
+            replyId = data.reply_id || replyId
+            userEmotion = data.emotion || userEmotion
+            this.emotion = userEmotion
+
+            const emotionExpression = this.getExpressionForEmotion(userEmotion)
+            digitalHumanConfig = {
+              action: data.digital_human_action,
+              expression: data.digital_human_expression || emotionExpression,
+              motion: data.digital_human_motion
+            }
+
+            if (data.service_actions) {
+              this.messages[assistantMsgIndex].service_actions = data.service_actions
+            }
+            if (data.debug) {
+              this.messages[assistantMsgIndex].debug_info = data.debug
+            }
+
+            if (this.$refs.digitalHuman) {
+              this.$refs.digitalHuman.applyDigitalHuman({
+                ...digitalHumanConfig,
+                emotion: userEmotion,
+                speaking: !!leadSpeechPromise
+              })
+            }
+          }
         }
 
-        this.messages.push({ role: 'assistant', text: answer, service_actions: serviceActions, debug_info: debugInfo })
-        this.emotion = userEmotion
-        this.status = 'speak'
-        this.scrollToBottom()
-
-        if (this.$refs.digitalHuman) {
-          this.$refs.digitalHuman.applyDigitalHuman({
-            ...digitalHuman,
-            emotion: userEmotion,
-            speaking: false
-          })
+        const onError = (error) => {
+          if (replySeq !== this.activeReplySeq) return
+          console.error('Streaming error:', error)
+          this.messages[assistantMsgIndex].text = '当前网络不稳定，您可以稍后再问我。'
+          this.status = 'idle'
+          this.scrollToBottom()
         }
-        await this.trySpeak(speechText, replySeq, replyId)
-        this.chatQuestionCount += 1
-        this.maybePromptChatFeedback(sessionId)
+
+        const onClose = async () => {
+          if (replySeq !== this.activeReplySeq) return
+          if (leadSpeechPromise) {
+            await leadSpeechPromise
+            if (replySeq !== this.activeReplySeq) return
+          }
+
+          let remainingSpeechText = speechText
+          if (leadSpeechText && remainingSpeechText.startsWith(leadSpeechText)) {
+            remainingSpeechText = remainingSpeechText.slice(leadSpeechText.length).trim()
+          }
+          if (remainingSpeechText) {
+            await this.trySpeak(remainingSpeechText, replySeq, `${replyId}_tail`)
+          }
+          this.chatQuestionCount += 1
+          this.maybePromptChatFeedback(sessionId)
+        }
+
+        this.currentSseClient = await streamChat({ text, user_id: userId, session_id: sessionId, ...locationPayload }, onMessage, onError, onClose)
       } catch (e) {
         if (replySeq !== this.activeReplySeq) return
         this.messages.push({ role: 'assistant', text: '当前网络不稳定，您可以稍后再问我。' })
@@ -838,8 +922,18 @@ export default {
       }
     },
     handleFeedbackSubmit() {
+      this.closeSseConnection()
+      this.stopCurrentSpeech()
       if (this.feedbackModalConfig.params) {
         openFeedbackPage(this.feedbackModalConfig.params)
+      }
+    },
+    closeSseConnection() {
+      if (this.currentSseClient) {
+        try {
+          this.currentSseClient.close()
+        } catch (e) {}
+        this.currentSseClient = null
       }
     },
     getExpressionForEmotion(emotion) {
@@ -854,6 +948,9 @@ export default {
       return emotionMap[emotion] || 'Normal'
     },
     stopCurrentSpeech(resetDigital = true) {
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel()
+      }
       if (this.audioElement) {
         this.audioElement.onplay = null
         this.audioElement.onended = null
@@ -971,6 +1068,33 @@ export default {
         })
       })
     },
+    playBrowserSpeech(text, replySeq) {
+      return new Promise((resolve) => {
+        if (
+          !text ||
+          replySeq !== this.activeReplySeq ||
+          typeof window === 'undefined' ||
+          !window.speechSynthesis ||
+          typeof window.SpeechSynthesisUtterance !== 'function'
+        ) {
+          resolve(false)
+          return
+        }
+
+        const utterance = new window.SpeechSynthesisUtterance(text)
+        utterance.lang = 'zh-CN'
+        utterance.rate = 1
+        utterance.pitch = 1
+        utterance.onstart = () => {
+          if (replySeq === this.activeReplySeq && this.$refs.digitalHuman) {
+            this.$refs.digitalHuman.startSpeaking({ motion: 'Tap' })
+          }
+        }
+        utterance.onend = () => resolve(true)
+        utterance.onerror = () => resolve(false)
+        window.speechSynthesis.speak(utterance)
+      })
+    },
     async trySpeak(text, replySeq = this.activeReplySeq, replyId = String(replySeq)) {
       try {
         const speechChunks = this.splitSpeechText(text)
@@ -980,26 +1104,34 @@ export default {
             if (replySeq !== this.activeReplySeq) return
             const audio = await post('/ai/tts', {
               text: speechChunks[i],
-              voice: 'female',
+              voice: this.digitalHumanVoice,
               reply_id: `${replyId}_${i + 1}`
             })
             if (replySeq !== this.activeReplySeq) return
             if (!audio || !audio.audio_data) {
               continue
             }
-            const played = await this.playSpeechAudio(audio.audio_data, replySeq)
+            const played = audio && audio.audio_data
+              ? await this.playSpeechAudio(audio.audio_data, replySeq)
+              : await this.playBrowserSpeech(speechChunks[i], replySeq)
             if (!played) return
           }
           this.finishSpeaking(replySeq)
           return
         }
 
-        const audio = await post('/ai/tts', { text, voice: 'female', reply_id: replyId })
+        const audio = await post('/ai/tts', { text, voice: this.digitalHumanVoice, reply_id: replyId })
         if (replySeq !== this.activeReplySeq) return
 
         if (audio && audio.audio_data) {
           this.stopCurrentSpeech(false)
           const played = await this.playSpeechAudio(audio.audio_data, replySeq)
+          if (played) {
+            this.finishSpeaking(replySeq)
+            return
+          }
+        } else {
+          const played = await this.playBrowserSpeech(text, replySeq)
           if (played) {
             this.finishSpeaking(replySeq)
             return

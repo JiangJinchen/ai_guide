@@ -7,17 +7,10 @@ const emptyForm = {
   location: '',
   latitude: '',
   longitude: '',
-  description: '',
-  detail: '',
   schedule_times: '',
-  schedule_note: '以景区当日公告为准',
   duration_minutes: '',
-  status: 'available',
-  navigation_tips: '',
-  notice: '',
-  source_name: '灵山胜境官方小程序',
-  source_type: 'manual',
-  sort_order: 100,
+  content: '',
+  significance: '',
   is_active: true
 }
 
@@ -27,15 +20,10 @@ const typeLabels = {
   zen: '禅修体验'
 }
 
-const sourceLabels = {
-  official: '景区官方渠道',
-  ota: '第三方票务平台',
-  manual: '管理端人工维护'
-}
-
 function ActivitiesPage() {
   const [items, setItems] = useState([])
   const [form, setForm] = useState(emptyForm)
+  const [editingId, setEditingId] = useState(null)
   const [message, setMessage] = useState('')
 
   useEffect(() => {
@@ -56,27 +44,50 @@ function ActivitiesPage() {
   }
 
   const buildPayload = () => ({
-    ...form,
+    name: form.name,
+    activity_type: form.activity_type,
+    location: form.location,
     latitude: form.latitude ? Number(form.latitude) : null,
     longitude: form.longitude ? Number(form.longitude) : null,
+    schedule_times: form.schedule_times,
     duration_minutes: form.duration_minutes ? Number(form.duration_minutes) : null,
-    sort_order: Number(form.sort_order || 100)
+    content: form.content,
+    significance: form.significance,
+    is_active: form.is_active
   })
 
-  const handleAdd = async () => {
-    if (!form.name || !form.source_name) {
-      setMessage('请填写活动名称和信息来源')
+  const handleSubmit = async () => {
+    if (!form.name.trim() || !form.location.trim()) {
+      setMessage('请填写活动名称和地点')
       return
     }
 
     try {
-      await request.post('/admin/activities', buildPayload())
+      if (editingId) {
+        await request.put(`/admin/activities/${editingId}`, buildPayload())
+      } else {
+        await request.post('/admin/activities', buildPayload())
+      }
       setForm(emptyForm)
-      setMessage('活动信息已添加')
+      setEditingId(null)
+      setMessage(editingId ? '活动信息已更新' : '活动信息已添加')
       loadActivities()
     } catch (error) {
       setMessage(error.response?.data?.detail || '活动信息添加失败')
     }
+  }
+
+  const editItem = (item) => {
+    let scheduleTimes = item.schedule_times || ''
+    try {
+      const parsed = JSON.parse(scheduleTimes)
+      if (Array.isArray(parsed)) scheduleTimes = parsed.join(', ')
+    } catch (error) {
+      // Keep legacy plain-text schedules editable.
+    }
+    setEditingId(item.id)
+    setForm({ ...emptyForm, ...item, schedule_times: scheduleTimes, latitude: item.latitude ?? '', longitude: item.longitude ?? '', duration_minutes: item.duration_minutes ?? '' })
+    window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   const toggleActive = async (item) => {
@@ -115,7 +126,7 @@ function ActivitiesPage() {
       {message && <p className="success">{message}</p>}
 
       <div className="card">
-        <h3>新增活动信息</h3>
+        <h3>{editingId ? '编辑活动信息' : '新增活动信息'}</h3>
         <div className="toolbar ticket-form">
           <div>
             <label>活动名称</label>
@@ -149,45 +160,20 @@ function ActivitiesPage() {
             <label>时长</label>
             <input type="number" value={form.duration_minutes} onChange={(e) => updateForm('duration_minutes', e.target.value)} />
           </div>
-          <div>
-            <label>来源类型</label>
-            <select value={form.source_type} onChange={(e) => updateForm('source_type', e.target.value)}>
-              {Object.entries(sourceLabels).map(([value, label]) => (
-                <option key={value} value={value}>{label}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label>来源名称</label>
-            <input value={form.source_name} onChange={(e) => updateForm('source_name', e.target.value)} />
-          </div>
-          <div>
-            <label>排序</label>
-            <input type="number" value={form.sort_order} onChange={(e) => updateForm('sort_order', e.target.value)} />
-          </div>
         </div>
 
         <div className="form-group">
-          <label>时间说明</label>
-          <input value={form.schedule_note} onChange={(e) => updateForm('schedule_note', e.target.value)} />
+          <label>活动内容</label>
+          <textarea rows={4} value={form.content} onChange={(e) => updateForm('content', e.target.value)} />
         </div>
         <div className="form-group">
-          <label>简要介绍</label>
-          <textarea rows={3} value={form.description} onChange={(e) => updateForm('description', e.target.value)} />
+          <label>活动意义</label>
+          <textarea rows={3} value={form.significance} onChange={(e) => updateForm('significance', e.target.value)} />
         </div>
-        <div className="form-group">
-          <label>活动详情</label>
-          <textarea rows={4} value={form.detail} onChange={(e) => updateForm('detail', e.target.value)} />
+        <div className="table-actions">
+          <button onClick={handleSubmit}>{editingId ? '保存修改' : '添加活动信息'}</button>
+          {editingId && <button className="secondary-button" onClick={() => { setEditingId(null); setForm(emptyForm) }}>取消编辑</button>}
         </div>
-        <div className="form-group">
-          <label>导航提示</label>
-          <textarea rows={2} value={form.navigation_tips} onChange={(e) => updateForm('navigation_tips', e.target.value)} />
-        </div>
-        <div className="form-group">
-          <label>注意事项</label>
-          <textarea rows={2} value={form.notice} onChange={(e) => updateForm('notice', e.target.value)} />
-        </div>
-        <button onClick={handleAdd}>添加活动信息</button>
       </div>
 
       <div className="card">
@@ -200,7 +186,7 @@ function ActivitiesPage() {
               <th>类型</th>
               <th>地点</th>
               <th>时间</th>
-              <th>来源</th>
+              <th>活动内容</th>
               <th>状态</th>
               <th>操作</th>
             </tr>
@@ -213,9 +199,10 @@ function ActivitiesPage() {
                 <td>{typeLabels[item.activity_type] || item.activity_type}</td>
                 <td>{item.location || '-'}</td>
                 <td>{formatTimes(item.schedule_times)}</td>
-                <td>{sourceLabels[item.source_type] || item.source_name}</td>
+                <td>{item.content || '-'}</td>
                 <td>{item.is_active ? '已上线' : '已下线'}</td>
                 <td className="table-actions">
+                  <button onClick={() => editItem(item)}>编辑</button>
                   <button onClick={() => toggleActive(item)}>{item.is_active ? '下线' : '上线'}</button>
                   <button onClick={() => handleDelete(item.id)}>删除</button>
                 </td>

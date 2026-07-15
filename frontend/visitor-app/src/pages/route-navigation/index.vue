@@ -6,12 +6,13 @@
         class="map-view"
         :latitude="mapCenter.latitude"
         :longitude="mapCenter.longitude"
-        :scale="17"
+        :scale="mapScale"
         :markers="mapMarkers"
         :polyline="mapPolyline"
         :include-points="includePoints"
         show-location
         @markertap="handleMarkerTap"
+        @regionchange="handleRegionChange"
       />
 
       <view class="map-status">
@@ -36,7 +37,7 @@
       <view class="summary-head">
         <view>
           <text class="route-title">{{ routeName }}</text>
-          <text class="route-desc">从{{ startName }}出发，按顺序游览 {{ waypoints.length }} 个景点。</text>
+          <text class="route-desc">从 {{ startName }} 出发，按顺序游览 {{ waypoints.length }} 个景点。</text>
         </view>
         <view class="summary-badge">
           <text>{{ formatDuration(totalDurationSec) }}</text>
@@ -68,11 +69,17 @@
         <text class="waypoint-index">起</text>
         <view class="waypoint-main">
           <text class="waypoint-name">{{ startName }}</text>
-          <text class="waypoint-meta">{{ coordinateText(startLocation) }}</text>
         </view>
       </view>
 
-      <view class="waypoint-card" v-for="spot in waypoints" :key="spot.id || spot.order">
+      <view
+        class="waypoint-card"
+        :class="{ selected: isWaypointSelected(spot) }"
+        v-for="(spot, index) in waypoints"
+        :key="spot.id || spot.order"
+        :id="'waypoint-' + index"
+        @click="selectWaypoint(spot, index)"
+      >
         <text class="waypoint-index" :class="{ arrived: isWaypointArrived(spot) }">
           {{ isWaypointArrived(spot) ? '✓' : spot.order }}
         </text>
@@ -80,7 +87,12 @@
           <text class="waypoint-name">{{ spot.name }}</text>
           <text class="waypoint-meta">{{ spot.location || '灵山胜境景区内' }}</text>
         </view>
-        <text class="mini-btn" @click="openSpotMap(spot)">地图</text>
+        <div @click.stop="openSpotMap(spot)">
+          <svg viewBox="0 0 1024 1024" width="24" height="24" fill="#814b00ff">
+            <path d="M906.000638 1023.99996a99.290887 99.290887 0 0 1-57.16748-18.052889L483.763632 746.186063l-55.161604 221.649355a40.11753 40.11753 0 0 1-39.114592 30.088147 40.11753 40.11753 0 0 1-39.114592-31.091086l-82.240937-352.031328a20.058765 20.058765 0 0 0-11.032321-14.041135L50.494306 504.477943l-5.014692-3.008815a100.293826 100.293826 0 0 1 18.052889-176.517133L886.944811 7.020568a100.293826 100.293826 0 0 1 136.399603 101.296764l-17.04995 821.406432v3.008815a99.290887 99.290887 0 0 1-58.170419 81.237998 100.293826 100.293826 0 0 1-42.123407 10.029383z m-11.03232-84.246814a20.058765 20.058765 0 0 0 31.091085-13.038197l17.049951-821.406432v-3.008815a20.058765 20.058765 0 0 0-27.079333-21.061703L92.617712 399.169426a20.058765 20.058765 0 0 0-6.017629 34.099901l203.596466 94.276196a99.290887 99.290887 0 0 1 55.161604 68.199801l45.132222 190.558269 29.085209-117.343776a40.11753 40.11753 0 0 1 62.182172-23.06758z"></path>
+            <path d="M389.487436 997.923565a40.11753 40.11753 0 0 1-27.079333-69.202739l191.561207-176.517134a40.11753 40.11753 0 0 1 54.158666 59.173358L416.566769 986.891244a40.11753 40.11753 0 0 1-27.079333 11.032321zM462.701929 714.092039a40.11753 40.11753 0 0 1-31.091086-65.190987L917.032959 42.123407a40.11753 40.11753 0 1 1 62.182172 50.146913L493.793015 699.047965a40.11753 40.11753 0 0 1-31.091086 15.044074z"></path>
+          </svg>
+        </div>
       </view>
     </view>
   </view>
@@ -111,6 +123,9 @@ import { requestCurrentLocation } from '@/utils/location'
 import { promptForFeedback, markFeedbackPrompt, openFeedbackPage } from '@/utils/feedback'
 import startIcon from '@/static/map/起点.png'
 import waypointIcon from '@/static/map/途经点.png'
+
+const START_MARKER_ID = 1
+const WAYPOINT_MARKER_ID_BASE = 100
 
 const DEFAULT_LOCATION = {
   latitude: 31.426486,
@@ -150,6 +165,8 @@ export default {
       hasReordered: false,
       navigationSessionId: '',
       isPageActive: true,
+      mapScale: 17,
+      selectedWaypointKey: '',
       showFeedbackModal: false,
       feedbackModalConfig: {
         title: '',
@@ -201,6 +218,56 @@ export default {
     nextWaypointName() {
       return this.currentTargetPoint?.name || this.waypoints[0]?.name || '下一站'
     },
+    activeWaypointIndex() {
+      if (!Array.isArray(this.waypoints) || !this.waypoints.length) return -1
+      const targetKey = this.currentTargetPoint ? this.pointKey(this.currentTargetPoint) : ''
+      const matchedIndex = this.waypoints.findIndex(spot => this.pointKey(spot) === targetKey)
+      if (matchedIndex > -1) return matchedIndex
+      const order = Number(this.activeStep?.segment_order || this.activeSegment?.order || 1)
+      return Math.max(0, Math.min(this.waypoints.length - 1, order - 1))
+    },
+    nextWaypointIndex() {
+      if (this.activeWaypointIndex < 0) return -1
+      const nextIndex = this.activeWaypointIndex + 1
+      return nextIndex < this.waypoints.length ? nextIndex : -1
+    },
+    selectedWaypointIndex() {
+      if (!this.selectedWaypointKey) return -1
+      return this.waypoints.findIndex(spot => this.pointKey(spot) === this.selectedWaypointKey)
+    },
+    visibleWaypointNameKeys() {
+      const candidates = this.waypoints
+        .map((spot, index) => {
+          const key = this.pointKey(spot)
+          const isSelected = key === this.selectedWaypointKey
+          const isActive = index === this.activeWaypointIndex
+          const isNext = index === this.nextWaypointIndex
+          const canShowByZoom = this.mapScale >= 18
+          if (!isSelected && !isActive && !isNext && !canShowByZoom) return null
+          return {
+            spot,
+            key,
+            priority: (isSelected ? 100 : 0) + (isActive ? 80 : 0) + (isNext ? 60 : 0) + (canShowByZoom ? 10 : 0)
+          }
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.priority - a.priority)
+
+      const visible = []
+      const minDistance = this.mapScale >= 18 ? 32 : 56
+      candidates.forEach(candidate => {
+        const overlaps = visible.some(item => {
+          return this.calcDistanceM(
+            candidate.spot.latitude,
+            candidate.spot.longitude,
+            item.spot.latitude,
+            item.spot.longitude
+          ) < minDistance
+        })
+        if (!overlaps) visible.push(candidate)
+      })
+      return visible.map(item => item.key)
+    },
     totalDistance() {
       return this.navigationData?.total_distance_m || this.navigationPlan?.total_distance || 0
     },
@@ -239,7 +306,7 @@ export default {
     },
     distanceToTargetText() {
       if (this.distanceToTarget === null) return '等待定位'
-      return `距下一点${this.formatDistance(this.distanceToTarget)}`
+      return `距下一点 ${this.formatDistance(this.distanceToTarget)}`
     },
     routePolyline() {
       const polyline = this.navigationData?.polyline || []
@@ -266,16 +333,24 @@ export default {
       if (this.isValidPoint(this.currentLocation || this.startLocation)) {
         const start = this.currentLocation || this.startLocation
         markers.push({
-          id: 1,
+          id: START_MARKER_ID,
           latitude: Number(start.latitude),
           longitude: Number(start.longitude),
           title: this.currentLocation ? '当前位置' : this.startName,
-          width: 28,
-          height: 28,
+          width: 30,
+          height: 30,
           iconPath: startIcon,
+          label: {
+            content: this.currentLocation ? '我' : '起',
+            color: '#ffffff',
+            fontSize: 12,
+            bgColor: '#2f7d55',
+            borderRadius: 15,
+            padding: 5
+          },
           callout: {
-            content: this.currentLocation ? '当前位置' : this.startName,
-            display: 'BYCLICK',
+            content: this.currentLocation ? '当前点位' : `起点 · ${this.startName}`,
+            display: 'ALWAYS',
             color: '#37251a',
             bgColor: '#fff8e8',
             padding: 8,
@@ -287,25 +362,30 @@ export default {
       this.waypoints.forEach((spot, index) => {
         if (!this.isValidPoint(spot)) return
         const arrived = this.isWaypointArrived(spot)
+        const isSelected = this.pointKey(spot) === this.selectedWaypointKey
+        const isActive = index === this.activeWaypointIndex
+        const isNext = index === this.nextWaypointIndex
+        const isEnd = index === this.waypoints.length - 1
+        const shouldShowName = this.visibleWaypointNameKeys.includes(this.pointKey(spot))
         markers.push({
-          id: index + 2,
+          id: WAYPOINT_MARKER_ID_BASE + index,
           latitude: Number(spot.latitude),
           longitude: Number(spot.longitude),
           title: spot.name,
-          width: 26,
-          height: 26,
+          width: isSelected || isActive || isNext ? 34 : 28,
+          height: isSelected || isActive || isNext ? 34 : 28,
           iconPath: waypointIcon,
           label: {
-            content: arrived ? '✓' : String(spot.order || index + 1),
-            color: arrived ? '#ffffff' : '#8c3228',
+            content: arrived ? '✓' : (isEnd ? '终' : String(spot.order || index + 1)),
+            color: '#ffffff',
             fontSize: 12,
-            bgColor: arrived ? '#2f7d55' : '#fff8e8',
-            borderRadius: 13,
+            bgColor: arrived ? '#2f7d55' : (isEnd ? '#8c3228' : '#c19148'),
+            borderRadius: 14,
             padding: 5
           },
           callout: {
-            content: spot.name,
-            display: 'BYCLICK',
+            content: `${spot.order || index + 1} · ${spot.name}`,
+            display: shouldShowName ? 'ALWAYS' : 'BYCLICK',
             color: '#37251a',
             bgColor: '#fff8e8',
             padding: 8,
@@ -444,6 +524,27 @@ export default {
     pointKey(point) {
       return String(point?.spot_id || point?.id || point?.order || `${point?.latitude},${point?.longitude}`)
     },
+    handleRegionChange(event) {
+      const scale = Number(event.detail?.scale)
+      if (Number.isFinite(scale) && scale > 0) {
+        this.mapScale = scale
+      }
+    },
+    isWaypointSelected(spot) {
+      return this.selectedWaypointKey && this.pointKey(spot) === this.selectedWaypointKey
+    },
+    selectWaypoint(spot, index = this.waypoints.findIndex(item => this.pointKey(item) === this.pointKey(spot))) {
+      if (!spot) return
+      this.selectedWaypointKey = this.pointKey(spot)
+      if (index > -1) {
+        this.$nextTick(() => {
+          uni.pageScrollTo({
+            selector: `#waypoint-${index}`,
+            duration: 240
+          })
+        })
+      }
+    },
     normalizeWaypoint(spot, index) {
       return {
         id: spot.id || spot.spot_id || index + 1,
@@ -538,7 +639,7 @@ export default {
       return {
         route_name: this.navigationPlan.route_name || '游览路线',
         provider_type: 'haversine_navigation',
-        travel_mode_label: this.navigationPlan.travel_mode_label || '步行',
+        travel_mode_label: this.navigationPlan.travel_mode_label || '姝ヨ',
         start_location: start,
         waypoints: normalizedWaypoints,
         total_distance_m: this.navigationPlan.total_distance || 0,
@@ -623,7 +724,7 @@ export default {
           ...point,
           accuracy: 8,
           provider: 'simulation',
-          name: '模拟当前位置'
+          name: '妯℃嫙褰撳墠浣嶇疆'
         })
         if (this.simulationIndex >= points.length - 1) {
           clearInterval(this.simulationTimer)
@@ -710,7 +811,7 @@ export default {
         accuracy: Number(source.accuracy || 0),
         provider: source.provider || 'gcj02',
         timestamp: Date.now(),
-        name: source.name || '当前位置'
+        name: source.name || '褰撳墠浣嶇疆'
       }
     },
     evaluateNavigationProgress(location) {
@@ -747,7 +848,7 @@ export default {
       if (this.activeStepIndex < this.steps.length - 1) {
         this.activeStepIndex += 1
         this.deviationCount = 0
-        uni.showToast({ title: '已自动进入下一指引', icon: 'none' })
+        uni.showToast({ title: '宸茶嚜鍔ㄨ繘鍏ヤ笅涓€鎸囧紩', icon: 'none' })
         return
       }
       this.completeNavigation()
@@ -760,7 +861,7 @@ export default {
       this.isTracking = false
       this.clearTrackingTimers()
       setTimeout(() => this.maybePromptRouteFeedback(), 800)
-      uni.showToast({ title: '已到达终点', icon: 'success' })
+      uni.showToast({ title: '宸插埌杈剧粓鐐?, icon: 'success' })
     },
     getRouteFeedbackKey() {
       const planId = this.navigationPlan?.route_id || this.navigationPlan?.id
@@ -773,8 +874,8 @@ export default {
       promptForFeedback({
         type: 'route',
         targetKey,
-        title: '评价',
-        content: '导航已经结束，愿意花几秒钟评价这条路线和导航指引吗？',
+        title: '璇勪环',
+        content: '瀵艰埅宸茬粡缁撴潫锛屾効鎰忚姳鍑犵閽熻瘎浠疯繖鏉¤矾绾垮拰瀵艰埅鎸囧紩鍚楋紵',
         params: {
           feedback_type: 'route',
           target_type: 'route',
@@ -807,8 +908,8 @@ export default {
       const result = await promptForFeedback({
         type: 'route',
         targetKey,
-        title: '评价',
-        content: '导航已经结束，愿意花几秒钟评价这条路线和导航指引吗？',
+        title: '璇勪环',
+        content: '瀵艰埅宸茬粡缁撴潫锛屾効鎰忚姳鍑犵閽熻瘎浠疯繖鏉¤矾绾垮拰瀵艰埅鎸囧紩鍚楋紵',
         params: {
           feedback_type: 'route',
           target_type: 'route',
@@ -897,9 +998,10 @@ export default {
     },
     handleMarkerTap(event) {
       const markerId = Number(event.detail?.markerId)
-      if (markerId >= 2) {
-        const target = this.waypoints[markerId - 2]
-        if (target) this.openSpotMap(target)
+      if (markerId >= WAYPOINT_MARKER_ID_BASE) {
+        const index = markerId - WAYPOINT_MARKER_ID_BASE
+        const target = this.waypoints[index]
+        if (target) this.selectWaypoint(target, index)
       }
     },
     calcDistanceM(lat1, lon1, lat2, lon2) {
@@ -965,10 +1067,6 @@ export default {
       const rest = minutes % 60
       return rest ? `${hour}小时${rest}分钟` : `${hour}小时`
     },
-    coordinateText(location) {
-      if (!this.isValidPoint(location)) return '当前位置'
-      return `${Number(location.latitude).toFixed(5)}，${Number(location.longitude).toFixed(5)}`
-    }
   }
 }
 </script>
@@ -1199,6 +1297,11 @@ export default {
   gap: 18rpx;
 }
 
+.waypoint-card.selected {
+  outline: 2rpx solid rgba(140, 50, 40, 0.28);
+  background: #fff3d9;
+}
+
 .start-card {
   border: 2rpx solid rgba(140, 50, 40, 0.22);
 }
@@ -1263,3 +1366,5 @@ export default {
   font-size: 26rpx;
 }
 </style>
+
+

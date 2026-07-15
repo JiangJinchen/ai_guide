@@ -44,13 +44,11 @@
     <view class="section">
       <view class="section-head">
         <text class="section-title">售票与乘车点</text>
-        <text class="section-note">可调用系统地图</text>
       </view>
       <view class="location-list">
         <view class="location-row" v-for="location in filteredLocations" :key="location.id">
           <view class="location-copy">
             <text class="location-name">{{ location.name }}</text>
-            <text class="location-desc">{{ location.desc }}</text>
           </view>
           <view class="nav-icon" @click="openLocation(location)">
             <text class="nav-icon-text">导</text>

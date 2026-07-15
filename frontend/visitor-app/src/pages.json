@@ -1,6 +1,27 @@
 {
   "pages": [
     {
+      "path": "pages/splash/index",
+      "style": {
+        "navigationStyle": "custom",
+        "navigationBarTitleText": "启动"
+      }
+    },
+    {
+      "path": "pages/login/index",
+      "style": {
+        "navigationStyle": "custom",
+        "navigationBarTitleText": "登录"
+      }
+    },
+    {
+      "path": "pages/register/index",
+      "style": {
+        "navigationStyle": "custom",
+        "navigationBarTitleText": "注册"
+      }
+    },
+    {
       "path": "pages/home/index",
       "style": {
         "navigationBarTitleText": "灵山胜境",
@@ -72,6 +93,13 @@
       }
     },
     {
+      "path": "pages/digital-human-preview/index",
+      "style": {
+        "navigationBarTitleText": "数字人预览",
+        "navigationStyle": "custom"
+      }
+    },
+    {
       "path": "pages/recommendation/index",
       "style": {
         "navigationBarTitleText": "个性化推荐",
@@ -83,6 +111,14 @@
       "path": "pages/guide/index",
       "style": {
         "navigationBarTitleText": "景点讲解",
+        "navigationBarBackgroundColor": "#ffffff",
+        "navigationBarTextStyle": "black"
+      }
+    },
+    {
+      "path": "pages/spot-detail/index",
+      "style": {
+        "navigationBarTitleText": "景点详情",
         "navigationBarBackgroundColor": "#ffffff",
         "navigationBarTextStyle": "black"
       }

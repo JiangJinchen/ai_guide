@@ -454,6 +454,13 @@ def handle_activities(text: str, db: Session, conditions: dict) -> Optional[Orch
                     "address": first.get("location") or "",
                 },
             ))
+        actions.append(action(
+            "查看演出安排",
+            "navigate_to",
+            "演",
+            path="/pages/activity-service/index",
+            params={"type": "performance"},
+        ))
         return OrchestrationResult(True, reply, actions)
 
     activity_type = "zen" if contains_any(text, ["禅修", "体验"]) else "performance"
@@ -465,7 +472,17 @@ def handle_activities(text: str, db: Session, conditions: dict) -> Optional[Orch
         times = "、".join(item.get("schedule_times") or []) or "以现场安排为准"
         lines.append(f"{item.get('name')}：{times}，地点：{item.get('location')}")
     label = "禅修体验" if activity_type == "zen" else "演出"
-    return OrchestrationResult(True, f"目前可查询到的{label}有：" + "；".join(lines) + "。")
+    return OrchestrationResult(
+        True,
+        f"目前可查询到的{label}有：" + "；".join(lines) + "。",
+        [action(
+            f"查看{label}安排",
+            "navigate_to",
+            "演",
+            path="/pages/activity-service/index",
+            params={"type": activity_type},
+        )],
+    )
 
 
 def handle_tickets(text: str, db: Session) -> Optional[OrchestrationResult]:
@@ -490,7 +507,45 @@ def handle_tickets(text: str, db: Session) -> Optional[OrchestrationResult]:
             notice = ticket.official_notice or ""
         price_text = "以公告为准" if price is None else f"{price:g}元"
         lines.append(f"{name}：{price_text}")
-    return OrchestrationResult(True, "我查到的票务信息是：" + "；".join(lines) + "。票价和优惠政策请以官方渠道或现场公告为准。")
+    return OrchestrationResult(
+        True,
+        "我查到的票务信息是：" + "；".join(lines) + "。票价和优惠政策请以官方渠道或现场公告为准。",
+        [action(
+            "查看购票服务",
+            "navigate_to",
+            "票",
+            path="/pages/ticket-assistant/index",
+        )],
+    )
+
+
+def handle_spot_list(text: str, db: Session) -> Optional[OrchestrationResult]:
+    if not contains_any(text, ["有哪些景点", "景点有哪些", "景点列表", "有什么景点", "推荐景点"]):
+        return None
+
+    spots = db.query(Spot).all()
+    if not spots:
+        return OrchestrationResult(
+            True,
+            "暂时没有查询到景点列表，请以景区现场信息为准。",
+            context={"debug_info": {"decision_path": "orchestrator_spot_list", "answer_source": "spot_db", "db_used": True}},
+        )
+
+    names = [spot.spot_name for spot in spots if spot.spot_name]
+    names = names[:12]
+    return OrchestrationResult(
+        True,
+        "灵山胜境目前可查询到的主要景点有：" + "、".join(names) + "。你可以告诉我想了解哪一个景点。",
+        [action("查看景点介绍", "navigate_to", "介", path="/pages/guide/index")],
+        context={
+            "debug_info": {
+                "decision_path": "orchestrator_spot_list",
+                "answer_source": "spot_db",
+                "db_used": True,
+                "spot_count": len(names),
+            }
+        },
+    )
 
 
 def handle_scenic_general_info(text: str, db: Session) -> Optional[OrchestrationResult]:
@@ -1099,6 +1154,7 @@ async def orchestrate_chat(
         lambda: resolve_confirmation(text, memory_key, db),
         lambda: handle_activities(text, db, conditions),
         lambda: handle_tickets(text, db),
+        lambda: handle_spot_list(text, db),
         lambda: handle_contextual_spot_question(text, db, memory_key),
         lambda: handle_scenic_general_info(text, db),
         lambda: handle_history(text, user_id, db, conditions),

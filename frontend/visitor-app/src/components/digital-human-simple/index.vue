@@ -87,7 +87,13 @@ export default {
       tickerMouthHandler: null,
       live2dTickerHandler: null,
       mediaElementSource: null,
-      sourceAudioElement: null
+      sourceAudioElement: null,
+      contextLost: false,
+      recovering: false,
+      initializing: false,
+      recoveryTimer: null,
+      contextLostHandler: null,
+      contextRestoredHandler: null
     }
   },
   computed: {
@@ -112,6 +118,11 @@ export default {
     }
   },
   watch: {
+    modelPath(newPath, oldPath) {
+      if (newPath && newPath !== oldPath && this.isReady) {
+        this.recoverLive2D()
+      }
+    },
     status(newStatus) {
       if (this.isReady) {
         const motionOptions = this.resolveStatusMotion(newStatus)
@@ -140,11 +151,18 @@ export default {
     this.initLive2D()
   },
   beforeUnmount() {
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer)
+      this.recoveryTimer = null
+    }
     this.destroyLive2D()
   },
   methods: {
     async initLive2D() {
+      if (this.initializing) return
+      this.initializing = true
       try {
+        this.loadError = ''
         await this.loadScript(CUBISM_CORE_PATH)
         await this.loadScript(PIXI_PATH)
         await this.loadScript(LIVE2D_PLUGIN_PATH)
@@ -170,11 +188,12 @@ export default {
           backgroundAlpha: 0,
           antialias: true,
           autoDensity: true,
-          resolution: window.devicePixelRatio || 1
+          resolution: Math.min(window.devicePixelRatio || 1, 2)
         })
         this.app.view.style.width = '100%'
         this.app.view.style.height = '100%'
         this.stageEl.appendChild(this.app.view)
+        this.bindCanvasContextEvents()
 
         const model = await Promise.race([
           PIXI.live2d.Live2DModel.from(this.modelPath, {
@@ -196,6 +215,7 @@ export default {
         model.y = height
 
         this.isReady = true
+        this.contextLost = false
         this.coreModelCache = this.getCoreModel()
         
         this.setExpression(EMOTION_MAP[this.emotion])
@@ -209,9 +229,78 @@ export default {
         
         this.$emit('ready')
       } catch (error) {
+        this.isReady = false
         this.loadError = error.message || '加载失败'
+        if (this.app) {
+          this.destroyLive2D()
+        }
         this.$emit('error', error)
+      } finally {
+        this.initializing = false
       }
+    },
+    bindCanvasContextEvents() {
+      this.unbindCanvasContextEvents()
+      const canvas = this.app && this.app.view
+      if (!canvas || typeof canvas.addEventListener !== 'function') return
+
+      this.contextLostHandler = (event) => {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault()
+        this.contextLost = true
+        this.isReady = false
+        if (this.app && typeof this.app.stop === 'function') this.app.stop()
+        this.scheduleLive2DRecovery()
+      }
+      this.contextRestoredHandler = () => {
+        this.scheduleLive2DRecovery(0)
+      }
+      canvas.addEventListener('webglcontextlost', this.contextLostHandler, false)
+      canvas.addEventListener('webglcontextrestored', this.contextRestoredHandler, false)
+    },
+    unbindCanvasContextEvents() {
+      const canvas = this.app && this.app.view
+      if (canvas && typeof canvas.removeEventListener === 'function') {
+        if (this.contextLostHandler) {
+          canvas.removeEventListener('webglcontextlost', this.contextLostHandler, false)
+        }
+        if (this.contextRestoredHandler) {
+          canvas.removeEventListener('webglcontextrestored', this.contextRestoredHandler, false)
+        }
+      }
+      this.contextLostHandler = null
+      this.contextRestoredHandler = null
+    },
+    scheduleLive2DRecovery(delay = 800) {
+      if (this.recoveryTimer) clearTimeout(this.recoveryTimer)
+      this.recoveryTimer = setTimeout(() => {
+        this.recoveryTimer = null
+        this.recoverLive2D()
+      }, delay)
+    },
+    async recoverLive2D() {
+      if (this.recovering) return
+      if (this.initializing) return
+      this.recovering = true
+      try {
+        this.destroyLive2D({ releaseAudioGraph: false })
+        await this.$nextTick()
+        await this.initLive2D()
+      } finally {
+        this.recovering = false
+      }
+    },
+    async ensureLive2D() {
+      const canvas = this.app && this.app.view
+      const gl = this.app && this.app.renderer && this.app.renderer.gl
+      const isLost = this.contextLost || (gl && typeof gl.isContextLost === 'function' && gl.isContextLost())
+      if (!this.isReady || !canvas || canvas.isConnected === false || isLost) {
+        await this.recoverLive2D()
+        return
+      }
+      if (this.app && typeof this.app.start === 'function') this.app.start()
+    },
+    pauseRendering() {
+      if (this.app && typeof this.app.stop === 'function') this.app.stop()
     },
     getCoreModel() {
       return this.model &&
@@ -468,15 +557,23 @@ export default {
         }
       }
     },
-    destroyLive2D() {
-      this.stopLipSync({ releaseAudioGraph: true })
+    destroyLive2D(options = {}) {
+      this.stopLipSync({ releaseAudioGraph: options.releaseAudioGraph !== false })
       this.unbindMouthUpdate()
       this.unbindLive2DTicker()
+      this.unbindCanvasContextEvents()
       if (this.app) {
-        this.app.destroy(true, { children: true, texture: true, baseTexture: true })
+        try {
+          this.app.destroy(true, { children: true, texture: true, baseTexture: true })
+        } catch (e) {}
         this.app = null
       }
       this.model = null
+      this.coreModelCache = null
+      this.currentExpression = ''
+      this.currentMotion = ''
+      this.contextLost = false
+      this.isReady = false
     }
   }
 }

@@ -1,6 +1,6 @@
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
-from app.models import Knowledge, KnowledgeChunk, Spot
+from app.models import FAQItem, Knowledge, KnowledgeChunk, Spot
 from app.rag_config import (
     RAG_MODE_CHUNK,
     RAG_MODE_HYBRID,
@@ -331,6 +331,21 @@ class KnowledgeService:
                 scored_results.append({
                     "content": full_text,
                     "score": score
+                })
+
+        # ----------------------
+        # 3. 读取启用的 FAQ
+        # ----------------------
+        faqs = self.db.query(FAQItem).filter(FAQItem.is_active.is_(True)).all()
+        for faq in faqs:
+            full_text = f"问题：{faq.question or ''}\n答案：{faq.answer or ''}\n分类：{faq.category or ''}"
+            score = self.calculate_score(full_text, query_words, query_fragments)
+            if faq.question:
+                score += sum(8 for word in query_words if word in faq.question.lower())
+            if score > 0:
+                scored_results.append({
+                    "content": full_text,
+                    "score": score,
                 })
 
         # 排序 + 取TOP

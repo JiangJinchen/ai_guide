@@ -1,12 +1,14 @@
 from fastapi import APIRouter, HTTPException, Depends, Query, Body, Request
-from pydantic import BaseModel, Field
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field, validator
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import Spot, VisitorInteraction, VisitorBehavior, RouteHistory, RouteShare, RouteDistanceCache, SpotVisitMeta, SpotTag, AppUserBehavior, TicketProduct, ScenicActivity, VisitorFeedback
+from app.models import Spot, FAQItem, DigitalHumanConfig, VisitorInteraction, VisitorBehavior, RouteHistory, RouteShare, RouteDistanceCache, SpotVisitMeta, SpotTag, AppUserBehavior, TicketProduct, ScenicActivity, VisitorFeedback
 from app.schemas import SpotResponse, VisitorInteractionResponse, VisitorFeedbackResponse
 from app.services.guide_asset_service import get_spot_guide_detail
-from typing import List, Optional
+from app.utils.validation import normalize_entity_id
+from typing import List, Optional, AsyncGenerator
 import os
 import httpx
 import re
@@ -15,9 +17,159 @@ import json
 import math
 import itertools
 import logging
+import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv(override=True)
+
+INTENT_SERVICE_MAPPING = {
+    "navigation": {
+        "name": "开始导航",
+        "icon": "导",
+        "action_type": "navigate_to",
+        "path": "/pages/route-navigation/index",
+    },
+    "guide": {
+        "name": "景点介绍",
+        "icon": "介",
+        "action_type": "navigate_to",
+        "path": "/pages/guide/index",
+    },
+    "route": {
+        "name": "路线规划",
+        "icon": "路",
+        "action_type": "navigate_to",
+        "path": "/pages/route-planning/index",
+    },
+    "ticket": {
+        "name": "购票服务",
+        "icon": "票",
+        "action_type": "navigate_to",
+        "path": "/pages/ticket-assistant/index",
+    },
+    "activity": {
+        "name": "活动安排",
+        "icon": "活",
+        "action_type": "navigate_to",
+        "path": "/pages/activity-service/index",
+    },
+    "nearby": {
+        "name": "附近景点",
+        "icon": "附",
+        "action_type": "navigate_to",
+        "path": "/pages/nearby-spots/index",
+    },
+    "recommendation": {
+        "name": "个性化推荐",
+        "icon": "荐",
+        "action_type": "navigate_to",
+        "path": "/pages/recommendation/index",
+    },
+    "profile": {
+        "name": "个人中心",
+        "icon": "我",
+        "action_type": "switch_tab",
+        "path": "/pages/profile/index",
+    },
+}
+
+def intent_to_service_actions(intent: dict, db: Session) -> list:
+    if not isinstance(intent, dict):
+        return []
+
+    service_type = intent.get("service")
+    params = dict(intent.get("params") or {})
+
+    if not service_type:
+        return []
+
+    mapping = INTENT_SERVICE_MAPPING.get(service_type)
+    if not mapping:
+        return []
+
+    spot = None
+    spot_id = normalize_entity_id(params.get("spot_id"))
+    spot_name = params.get("spot_name") or params.get("spot")
+    if spot_id:
+        spot = db.query(Spot).filter(Spot.id == spot_id).first()
+    elif spot_name:
+        spot = db.query(Spot).filter(Spot.spot_name == spot_name).first()
+
+    if spot:
+        params["spot_id"] = spot.id
+        params["spot_name"] = spot.spot_name
+        params.pop("spot", None)
+    elif "spot_id" in params:
+        params.pop("spot_id", None)
+
+    action = {
+        "name": mapping["name"],
+        "icon": mapping["icon"],
+        "action_type": mapping["action_type"],
+        "path": mapping["path"],
+        "params": params,
+        "payload": {},
+        "confidence": 0.8,
+    }
+
+    if service_type == "navigation":
+        latitude = params.get("latitude") or (spot.latitude if spot else None)
+        longitude = params.get("longitude") or (spot.longitude if spot else None)
+        if latitude is not None and longitude is not None:
+            action["action_type"] = "open_location"
+            action["path"] = ""
+            action["payload"] = {
+                "latitude": latitude,
+                "longitude": longitude,
+                "name": params.get("spot_name") or params.get("spot") or "目的地",
+                "address": params.get("address") or (spot.location if spot else ""),
+            }
+
+    return [action]
+
+
+def resolve_stream_service_actions(text: str, intent: dict, db: Session) -> list:
+    try:
+        model_actions = intent_to_service_actions(intent, db)
+    except Exception:
+        logger.exception("Failed to resolve model service actions")
+        db.rollback()
+        model_actions = []
+
+    from app.api.dialog_orchestrator import resolve_spot, spot_service_actions
+
+    try:
+        spot = resolve_spot(text, db)
+    except Exception:
+        logger.exception("Failed to resolve spot from chat text")
+        db.rollback()
+        return model_actions
+
+    navigation_patterns = ["我想去", "想去", "要去", "导航", "带我去", "前往", "怎么去", "怎么走"]
+    wants_navigation = any(pattern in (text or "") for pattern in navigation_patterns)
+    service_type = intent.get("service") if isinstance(intent, dict) else None
+    if not spot or (not wants_navigation and service_type not in {"guide", "navigation"}):
+        return model_actions
+
+    actions = []
+    seen = set()
+    spot_actions = spot_service_actions(
+        spot,
+        include_navigation=wants_navigation or service_type == "navigation",
+    )
+    for action in [*spot_actions, *model_actions]:
+        action_type = action.get("action_type", "navigate_to")
+        if action_type == "open_location":
+            payload = action.get("payload") or {}
+            identity = (action_type, payload.get("latitude"), payload.get("longitude"))
+        else:
+            identity = (action_type, action.get("path", ""))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        actions.append(action)
+
+    return actions[:3]
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +357,34 @@ def get_activity_source(db: Session, activity_type: Optional[str] = None):
         if not activity_type or item["activity_type"] == activity_type
     ]
 
+
+@router.get("/digital-human/config")
+def get_current_digital_human_config(db: Session = Depends(get_db)):
+    """Return the published profile used by the visitor digital human."""
+    config = db.query(DigitalHumanConfig).filter(
+        DigitalHumanConfig.is_active.is_(True)
+    ).order_by(DigitalHumanConfig.updated_at.desc(), DigitalHumanConfig.id.desc()).first()
+    if not config:
+        return {
+            "id": None,
+            "name": "灵山数字导游",
+            "model": "/static/live2d/epsilon_ja/epsilon_free/runtime/Epsilon_free.model3.json",
+            "voice": "female",
+            "clothes": "default",
+            "is_active": True,
+            "source": "default",
+        }
+    return {
+        "id": config.id,
+        "name": config.name,
+        "model": config.model or "/static/live2d/epsilon_ja/epsilon_free/runtime/Epsilon_free.model3.json",
+        "voice": config.voice if config.voice in {"female", "male"} else "female",
+        "clothes": config.clothes or "default",
+        "is_active": True,
+        "source": "database",
+        "updated_at": config.updated_at,
+    }
+
 @router.get("/activities")
 def get_activities(db: Session = Depends(get_db), activity_type: Optional[str] = None):
     return {
@@ -278,6 +458,9 @@ def get_ticket_assistant(db: Session = Depends(get_db), ticket_type: Optional[st
 class MessageRequest(BaseModel):
     text: str
     user_id: str
+    session_id: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 class MessageResponse(BaseModel):
     text: str
@@ -289,6 +472,7 @@ class MessageResponse(BaseModel):
     digital_human_action: str = "speak"
     digital_human_expression: str = "Normal"
     digital_human_motion: str = "Idle"
+    service_actions: List[dict] = Field(default_factory=list)
 
 # ======================
 # 百度AI密钥（用于情感倾向分析）
@@ -296,9 +480,19 @@ class MessageResponse(BaseModel):
 EMOTION_API_ID = os.getenv("EMOTION_API_ID", "")
 EMOTION_API_KEY = os.getenv("EMOTION_API_KEY", "")
 EMOTION_SECRET_KEY = os.getenv("EMOTION_SECRET_KEY", "")
+REMOTE_EMOTION_ENABLED = os.getenv("REMOTE_EMOTION_ENABLED", "false").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 AI_API_KEY = os.getenv("AI_API_KEY", "")
 QWEN_API_URL = "https://apihub.agnes-ai.com/v1/chat/completions"
 QWEN_MODEL = "agnes-2.0-flash"
+EMOTION_LLM_URL = os.getenv("EMOTION_LLM_URL", QWEN_API_URL)
+EMOTION_LLM_MODEL = os.getenv("EMOTION_LLM_MODEL", QWEN_MODEL)
+EMOTION_LLM_API_KEY = os.getenv("EMOTION_LLM_API_KEY", AI_API_KEY)
+try:
+    EMOTION_LLM_TIMEOUT = max(0.8, float(os.getenv("EMOTION_LLM_TIMEOUT", "2.0")))
+except (TypeError, ValueError):
+    EMOTION_LLM_TIMEOUT = 2.0
 AMAP_WEB_KEY = os.getenv("AMAP_WEB_KEY", "")
 AMAP_DISTANCE_URL = "https://restapi.amap.com/v3/distance"
 AMAP_WALKING_URL = "https://restapi.amap.com/v3/direction/walking"
@@ -321,20 +515,45 @@ STATUS_MOTION_MAP = {
     "speak": "Tap"
 }
 
+_BAIDU_TOKEN_CACHE = {"value": "", "expires_at": 0.0}
+_BAIDU_TOKEN_LOCK = asyncio.Lock()
+_BAIDU_EMOTION_BLOCKED_UNTIL = 0.0
+
 def resolve_digital_human_expression(emotion: str) -> str:
     return EMOTION_EXPRESSION_MAP.get(emotion or "neutral", "Normal")
 
 async def get_access_token():
-    url = "https://aip.baidubce.com/oauth/2.0/token"
-    params = {
-        "grant_type": "client_credentials",
-        "client_id": EMOTION_API_KEY,
-        "client_secret": EMOTION_SECRET_KEY
-    }
-    response = await http_client.post(url, params=params)
-    return response.json().get("access_token")
+    if not EMOTION_API_KEY or not EMOTION_SECRET_KEY:
+        return None
 
-def normalize_reply_text(text: str, max_chars: int = 260) -> str:
+    now = time.time()
+    if _BAIDU_TOKEN_CACHE["value"] and now < _BAIDU_TOKEN_CACHE["expires_at"]:
+        return _BAIDU_TOKEN_CACHE["value"]
+
+    async with _BAIDU_TOKEN_LOCK:
+        now = time.time()
+        if _BAIDU_TOKEN_CACHE["value"] and now < _BAIDU_TOKEN_CACHE["expires_at"]:
+            return _BAIDU_TOKEN_CACHE["value"]
+
+        url = "https://aip.baidubce.com/oauth/2.0/token"
+        params = {
+            "grant_type": "client_credentials",
+            "client_id": EMOTION_API_KEY,
+            "client_secret": EMOTION_SECRET_KEY
+        }
+        response = await http_client.post(url, params=params)
+        response.raise_for_status()
+        payload = response.json()
+        access_token = payload.get("access_token")
+        if not access_token:
+            return None
+
+        expires_in = max(60, int(payload.get("expires_in") or 2592000))
+        _BAIDU_TOKEN_CACHE["value"] = access_token
+        _BAIDU_TOKEN_CACHE["expires_at"] = time.time() + expires_in - 300
+        return access_token
+
+def normalize_reply_text(text: str, max_chars: Optional[int] = 260) -> str:
     """把大模型回复整理成数字人口播友好的纯文本。"""
     if not text:
         return ""
@@ -351,7 +570,7 @@ def normalize_reply_text(text: str, max_chars: int = 260) -> str:
     cleaned = re.sub(r"。{2,}", "。", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" 。\n\t")
 
-    if len(cleaned) > max_chars:
+    if max_chars and len(cleaned) > max_chars:
         end = max(cleaned.rfind("。", 0, max_chars), cleaned.rfind("，", 0, max_chars))
         if end < 80:
             end = max_chars
@@ -669,15 +888,46 @@ def get_spot_guide(spot_id: int, db: Session = Depends(get_db)):
 async def chat(request: MessageRequest, db: Session = Depends(get_db)):
     emotion_result = await analyze_emotion(text=request.text)
     user_emotion = emotion_result.get("emotion", "neutral")
-    
+
     interaction = VisitorInteraction(
         visitor_id=request.user_id,
+        session_id=request.session_id,
         interaction_type="chat",
         content=request.text,
         emotion=user_emotion
     )
     db.add(interaction)
     db.commit()
+
+    # Resolve deterministic APP services before invoking the remote model.
+    # This keeps legacy non-stream clients consistent with the SSE endpoint.
+    from app.api.dialog_orchestrator import orchestrate_chat
+    orchestration = await orchestrate_chat(
+        text=request.text,
+        user_id=request.user_id,
+        db=db,
+        emotion_result=emotion_result,
+        user_location={
+            "latitude": request.latitude,
+            "longitude": request.longitude,
+        } if request.latitude is not None and request.longitude is not None else None,
+        session_id=request.session_id,
+    )
+    if orchestration.handled:
+        reply_text = normalize_reply_text(orchestration.reply_text)
+        reply_id = uuid.uuid4().hex
+        return MessageResponse(
+            text=reply_text,
+            speech_text=reply_text,
+            reply_id=reply_id,
+            emotion=user_emotion,
+            emotion_source=emotion_result.get("source", ""),
+            emotion_reason=emotion_result.get("reason", emotion_result.get("note", "")),
+            digital_human_action="speak",
+            digital_human_expression=resolve_digital_human_expression(user_emotion),
+            digital_human_motion=STATUS_MOTION_MAP["speak"],
+            service_actions=orchestration.actions,
+        )
 
     from app.api.ai import ai_inference, AIRequest
     ai_result = await ai_inference(
@@ -723,6 +973,142 @@ def get_chat_history(user_id: str, db: Session = Depends(get_db)):
         .order_by(VisitorInteraction.created_at.desc())\
         .all()
     return history
+
+# ==============================
+# 5.1 流式对话接口
+# ==============================
+@router.post("/chat/stream")
+async def chat_stream(request: MessageRequest, db: Session = Depends(get_db)):
+    emotion_result = await analyze_emotion(text=request.text)
+    user_emotion = emotion_result.get("emotion", "neutral")
+
+    interaction = VisitorInteraction(
+        visitor_id=request.user_id,
+        session_id=request.session_id,
+        interaction_type="chat",
+        content=request.text,
+        emotion=user_emotion
+    )
+    db.add(interaction)
+    db.commit()
+
+    from app.api.ai import ai_stream_inference, AIRequest
+
+    reply_id = uuid.uuid4().hex
+
+    async def generate():
+        full_text = ""
+        speech_lead_text = ""
+        meta_marker = "__STREAM_META__"
+        emotion_prefix = ""
+        if user_emotion == "negative":
+            emotion_prefix = "感受到你有些不开心，我来帮你解决问题。"
+        elif user_emotion == "positive":
+            emotion_prefix = "听起来你心情不错。"
+
+        def build_metadata(meta: dict, service_actions: Optional[list] = None) -> dict:
+            display_text = f"{emotion_prefix}{full_text}"
+            intent = meta.get("intent", {})
+            if service_actions is None:
+                service_actions = resolve_stream_service_actions(request.text, intent, db)
+            return {
+                'type': 'metadata',
+                'reply_id': reply_id,
+                'emotion': user_emotion,
+                'emotion_source': emotion_result.get('source', ''),
+                'emotion_reason': emotion_result.get('reason', emotion_result.get('note', '')),
+                'digital_human_action': 'speak',
+                'digital_human_expression': resolve_digital_human_expression(user_emotion),
+                'digital_human_motion': STATUS_MOTION_MAP['speak'],
+                'speech_text': normalize_reply_text(display_text, max_chars=None),
+                'speech_lead_text': speech_lead_text,
+                **meta,
+                'service_actions': service_actions,
+            }
+
+        from app.api.dialog_orchestrator import orchestrate_chat
+
+        orchestration = await orchestrate_chat(
+            text=request.text,
+            user_id=request.user_id,
+            db=db,
+            emotion_result=emotion_result,
+            user_location={
+                "latitude": request.latitude,
+                "longitude": request.longitude,
+            } if request.latitude is not None and request.longitude is not None else None,
+            session_id=request.session_id,
+        )
+        if orchestration.handled:
+            full_text = orchestration.reply_text
+            content_data = {
+                'type': 'content',
+                'text': f"{emotion_prefix}{full_text}",
+                'reply_id': reply_id,
+            }
+            yield f"data: {json.dumps(content_data)}\n\n"
+            metadata = build_metadata(
+                {
+                    'debug': orchestration.context.get('debug_info', {
+                        'source': 'dialog_orchestrator',
+                        'reply_mode': orchestration.reply_mode,
+                    })
+                },
+                service_actions=orchestration.actions,
+            )
+            yield f"data: {json.dumps(metadata)}\n\n"
+            return
+
+        async for chunk in ai_stream_inference(
+            AIRequest(
+                text=request.text,
+                user_id=request.user_id,
+                emotion=user_emotion,
+                emotion_reason=emotion_result.get("reason", "")
+            ),
+            db
+        ):
+            if chunk.startswith(meta_marker) and chunk.endswith(meta_marker):
+                try:
+                    meta = json.loads(chunk[len(meta_marker):-len(meta_marker)])
+                except json.JSONDecodeError:
+                    print(f"[CHAT STREAM] Failed to parse metadata: {chunk[:150]}")
+                    meta = {}
+                yield f"data: {json.dumps(build_metadata(meta))}\n\n"
+                continue
+
+            full_text += chunk
+            content_data = {
+                'type': 'content',
+                'text': f"{emotion_prefix}{full_text}",
+                'reply_id': reply_id
+            }
+            yield f"data: {json.dumps(content_data)}\n\n"
+
+            if not speech_lead_text:
+                partial_speech = normalize_reply_text(
+                    f"{emotion_prefix}{full_text}",
+                    max_chars=None,
+                )
+                sentence_match = re.match(r"^.{12,}?[。！？!?；;]", partial_speech)
+                if sentence_match:
+                    speech_lead_text = sentence_match.group(0).strip()
+                    speech_data = {
+                        'type': 'speech',
+                        'text': speech_lead_text,
+                        'reply_id': reply_id,
+                    }
+                    yield f"data: {json.dumps(speech_data)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*"
+        }
+    )
 
 # ==============================
 # 6. 反馈与评价接口
@@ -1699,9 +2085,54 @@ class RouteGenerateRequest(RouteLocation):
     start_spot_id: Optional[int] = None
     travel_mode: str = "walking"
 
+    @validator("user_id", pre=True)
+    def normalize_user_id(cls, value):
+        if value in (None, ""):
+            return "guest"
+        return str(value)
+
+    @validator("must_spot_ids", pre=True)
+    def normalize_must_spot_ids(cls, value):
+        if value in (None, ""):
+            return []
+        if not isinstance(value, list):
+            value = [value]
+        ids = []
+        for item in value:
+            try:
+                spot_id = int(item)
+            except (TypeError, ValueError):
+                continue
+            if spot_id > 0:
+                ids.append(spot_id)
+        return ids
+
+    @validator("start_spot_id", pre=True)
+    def normalize_start_spot_id(cls, value):
+        try:
+            spot_id = int(value)
+        except (TypeError, ValueError):
+            return None
+        return spot_id if spot_id > 0 else None
+
+    @validator("latitude", "longitude", pre=True)
+    def normalize_optional_coordinate(cls, value):
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
 class SaveRouteRequest(BaseModel):
     user_id: str = "guest"
     route: dict
+
+    @validator("user_id", pre=True)
+    def normalize_user_id(cls, value):
+        if value in (None, ""):
+            return "guest"
+        return str(value)
 
 class CreateRouteShareRequest(BaseModel):
     route: dict
@@ -1751,6 +2182,15 @@ def calc_distance_m(lat1, lon1, lat2, lon2):
         math.sin(dlon / 2) ** 2
     )
     return int(round(radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))))
+
+def estimate_distance(lat1, lon1, lat2, lon2):
+    try:
+        values = [float(value) for value in (lat1, lon1, lat2, lon2)]
+    except (TypeError, ValueError):
+        return 9999
+    if not all(values):
+        return 9999
+    return calc_distance_m(*values)
 
 def normalize_travel_mode(value):
     return value if value in TRAVEL_MODE_CONFIG else "walking"
@@ -2631,10 +3071,16 @@ def select_route_spots(
     db: Optional[Session] = None,
     distance_memo=None,
     start_spot_id=None,
-    variant_type="classic"
+    variant_type="classic",
+    diversity_excluded_ids=None,
+    diversity_penalty=0.0
 ):
     selected = list(required_spots)
     selected_ids = {route_spot_value(spot, "id") for spot in selected}
+    diversity_excluded_ids = {
+        item for item in (diversity_excluded_ids or [])
+        if item not in selected_ids
+    }
     popularity_scores = {}
     if db:
         try:
@@ -2646,6 +3092,9 @@ def select_route_spots(
 
     def score_with_variant(spot):
         base_score = score_spot_for_preferences(spot, preferences, popularity_scores)
+        spot_id = route_spot_value(spot, "id")
+        if spot_id in diversity_excluded_ids:
+            base_score -= diversity_penalty or 8.0
         if variant_type == "easy":
             base_score *= 0.4
             distance = estimate_distance(latitude, longitude, route_spot_value(spot, "latitude"), route_spot_value(spot, "longitude")) if latitude and longitude else 9999
@@ -2690,6 +3139,17 @@ def select_route_spots(
 
 @router.post("/routes/generate")
 def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)):
+    logger.info(
+        "[ROUTE] generate_routes user_id=%s prefs=%s duration=%s must_spot_ids=%s start_spot_id=%s latitude=%s longitude=%s travel_mode=%s",
+        request.user_id,
+        request.preferences,
+        request.duration_minutes,
+        request.must_spot_ids,
+        request.start_spot_id,
+        request.latitude,
+        request.longitude,
+        request.travel_mode,
+    )
     spots = get_route_source_spots(db)
     budget = normalize_duration_budget(request.duration_minutes)
     travel_mode = normalize_travel_mode(request.travel_mode)
@@ -2707,6 +3167,7 @@ def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)
     ]
     routes = []
     seen_signatures = set()
+    used_spot_ids = {route_spot_value(spot, "id") for spot in required_spots}
     base_label = "偏好路线" if preferences else "经典路线"
     if required_spots and preferences:
         base_label = "必去补充路线"
@@ -2736,7 +3197,9 @@ def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)
                 db,
                 distance_memo,
                 request.start_spot_id,
-                variant_type
+                variant_type,
+                diversity_excluded_ids=used_spot_ids,
+                diversity_penalty=8.0 if variant_type != "easy" else 4.0
             )
         route = build_route(
             f"{base_label}{variant_name}",
@@ -2750,10 +3213,42 @@ def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)
             distance_memo,
             request.start_spot_id
         )
-        signature = (variant_name, tuple(item["id"] for item in route["route"]))
+        signature = tuple(item["id"] for item in route["route"])
         if signature in seen_signatures:
-            continue
+            selected = select_route_spots(
+                spots,
+                required_spots,
+                preferences,
+                variant_budget,
+                target_count,
+                request.latitude,
+                request.longitude,
+                travel_mode,
+                db,
+                distance_memo,
+                request.start_spot_id,
+                variant_type,
+                diversity_excluded_ids=used_spot_ids | set(signature),
+                diversity_penalty=12.0 if variant_type != "easy" else 6.0
+            )
+            route = build_route(
+                f"{base_label}{variant_name}",
+                "generated",
+                "",
+                selected,
+                request.latitude,
+                request.longitude,
+                travel_mode,
+                db,
+                distance_memo,
+                request.start_spot_id
+            )
+            signature = tuple(item["id"] for item in route["route"])
+            if signature in seen_signatures:
+                logger.info("[ROUTE] skip duplicate route variant=%s signature=%s", variant_name, signature)
+                continue
         seen_signatures.add(signature)
+        used_spot_ids.update(signature)
         route["time_budget"] = budget
         route["is_over_time"] = route["total_duration"] > budget
         route["must_spot_ids"] = request.must_spot_ids
@@ -2764,7 +3259,7 @@ def generate_routes(request: RouteGenerateRequest, db: Session = Depends(get_db)
             "spot_id": request.start_spot_id
         }
         route["description"] = route_description(preferences, len(required_spots), route["is_over_time"])
-        route["strategy"] = f"先锁定生成时的起点，若起点景点在路线中则作为第一站，其余景点按估算总距离优先排序，尽量减少总距离和折返；距离与耗时按{route['travel_mode_label']}和{route['distance_model']['type']}计算，移动中不自动重算整条路线。"
+        route["strategy"] = f""
         routes.append(route)
 
     routes.sort(key=lambda item: (item["is_over_time"], item["total_duration"], -item["total_spots"]))
@@ -2901,10 +3396,8 @@ def analyze_emotion_local(text: str) -> dict:
     
     return {"emotion": "neutral", "score": 1.0, "source": "local_rule", "reason": "未检测到明显情绪"}
 
-import asyncio
-
 async def analyze_emotion_with_llm(text: str) -> Optional[dict]:
-    if not AI_API_KEY:
+    if not EMOTION_LLM_API_KEY:
         return None
 
     prompt = f"""
@@ -2922,11 +3415,11 @@ async def analyze_emotion_with_llm(text: str) -> Optional[dict]:
 """
 
     headers = {
-        "Authorization": f"Bearer {AI_API_KEY}",
+        "Authorization": f"Bearer {EMOTION_LLM_API_KEY}",
         "Content-Type": "application/json"
     }
     payload = {
-        "model": QWEN_MODEL,
+        "model": EMOTION_LLM_MODEL,
         "messages": [
             {"role": "system", "content": "你只输出合法JSON。"},
             {"role": "user", "content": prompt}
@@ -2935,7 +3428,17 @@ async def analyze_emotion_with_llm(text: str) -> Optional[dict]:
     }
 
     try:
-        response = await http_client.post(QWEN_API_URL, headers=headers, json=payload, timeout=8)
+        response = await http_client.post(
+            EMOTION_LLM_URL,
+            headers=headers,
+            json=payload,
+            timeout=httpx.Timeout(
+                connect=min(1.0, EMOTION_LLM_TIMEOUT),
+                read=EMOTION_LLM_TIMEOUT,
+                write=EMOTION_LLM_TIMEOUT,
+                pool=min(1.0, EMOTION_LLM_TIMEOUT),
+            ),
+        )
         response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"].strip()
         match = re.search(r"\{.*\}", content, re.S)
@@ -2985,9 +3488,25 @@ def get_scenic_entrance():
 # ======================
 @router.post("/emotion")
 async def analyze_emotion(text: str = Body(..., embed=True)):
+    global _BAIDU_EMOTION_BLOCKED_UNTIL
+
     local_result = analyze_emotion_local(text)
-    if local_result["emotion"] in ("angry", "surprised", "shy"):
-        print(f"[EMOTION] 本地高优先级规则命中: {local_result}")
+    if not REMOTE_EMOTION_ENABLED:
+        return local_result
+
+    # Use the configured LLM as the primary emotion classifier. The local
+    # classifier remains a fast safety fallback when the model is unavailable.
+    llm_result = await analyze_emotion_with_llm(text)
+    if llm_result:
+        print(f"[EMOTION] LLM emotion classification completed: {llm_result}")
+        return llm_result
+    return local_result
+
+    if local_result["emotion"] != "neutral" or is_scenic_related(text):
+        print(f"[EMOTION] 本地规则命中: {local_result}")
+        return local_result
+
+    if time.time() < _BAIDU_EMOTION_BLOCKED_UNTIL:
         return local_result
 
     llm_result = await analyze_emotion_with_llm(text)
@@ -2998,7 +3517,8 @@ async def analyze_emotion(text: str = Body(..., embed=True)):
     try:
         print(f"[EMOTION] 开始调用百度API分析: {text}")
         access_token = await get_access_token()
-        print(f"[EMOTION] 获取到access_token")
+        if not access_token:
+            return local_result
 
         url = "https://aip.baidubce.com/rpc/2.0/nlp/v1/sentiment_classify"
         params = {
@@ -3022,12 +3542,10 @@ async def analyze_emotion(text: str = Body(..., embed=True)):
             error_code = result["error_code"]
             error_msg = result.get("error_msg", "")
             print(f"[EMOTION] 百度API错误: code={error_code}, msg={error_msg}")
-            
+
             if error_code == 18:
-                await asyncio.sleep(0.5)
-                response = await http_client.post(url, json=body, params=params, headers=headers)
-                result = response.json()
-                print(f"[EMOTION] 重试后百度API返回: {result}")
+                _BAIDU_EMOTION_BLOCKED_UNTIL = time.time() + 30
+                return local_result
 
         items = result.get("items", [])
         if items:
@@ -3137,43 +3655,52 @@ def get_visitor_behavior_by_user(visitor_id: str, db: Session = Depends(get_db))
 # 12. 客服中心接口
 # ==============================
 @router.get("/customer-service")
-def get_customer_service_info():
+def get_customer_service_info(db: Session = Depends(get_db)):
+    faq_items = db.query(FAQItem).filter(FAQItem.is_active.is_(True)).order_by(
+        FAQItem.sort_order.asc(), FAQItem.id.asc()
+    ).all()
+
+    # Keep the existing visitor experience available until the FAQ seed has run.
+    faqs = [
+        {"question": item.question, "answer": item.answer}
+        for item in faq_items
+    ] or [
+        {
+            "question": "门票有效期是多久？",
+            "answer": "门票当日有效，入园后可全天游览。如需二次入园，请在出口处办理入园登记。",
+        },
+        {
+            "question": "景区内可以使用无人机吗？",
+            "answer": "为保障游客安全及文物保护，景区内禁止使用无人机等飞行设备。",
+        },
+        {
+            "question": "景区提供行李寄存服务吗？",
+            "answer": "游客中心设有行李寄存处，提供免费寄存服务，营业时间与景区同步。",
+        },
+        {
+            "question": "园内观光车如何收费？",
+            "answer": "观光车单次乘坐15元/人，全天通票30元/人，可在各站点自由上下车。",
+        },
+        {
+            "question": "景区内有餐饮服务吗？",
+            "answer": "景区内设有素斋馆、咖啡厅及多个小吃售卖点，提供素食、简餐及特色小吃。",
+        },
+        {
+            "question": "儿童和老人有优惠政策吗？",
+            "answer": "6周岁以下或身高1.4米以下儿童免费；60-69周岁老人半价；70周岁以上老人免费。",
+        },
+        {
+            "question": "遇到紧急情况怎么办？",
+            "answer": "请立即拨打景区急救电话400-828-8888转1，或联系就近的工作人员寻求帮助。",
+        },
+        {
+            "question": "可以携带宠物入园吗？",
+            "answer": "除导盲犬外，景区内禁止携带宠物入园。",
+        },
+    ]
     return {
         "phone": "400-828-8888",
         "business_hours": "08:00 - 17:30",
         "holiday_hours": "08:00 - 18:00",
-        "faqs": [
-            {
-                "question": "门票有效期是多久？",
-                "answer": "门票当日有效，入园后可全天游览。如需二次入园，请在出口处办理入园登记。"
-            },
-            {
-                "question": "景区内可以使用无人机吗？",
-                "answer": "为保障游客安全及文物保护，景区内禁止使用无人机等飞行设备。"
-            },
-            {
-                "question": "景区提供行李寄存服务吗？",
-                "answer": "游客中心设有行李寄存处，提供免费寄存服务，营业时间与景区同步。"
-            },
-            {
-                "question": "园内观光车如何收费？",
-                "answer": "观光车单次乘坐15元/人，全天通票30元/人，可在各站点自由上下车。"
-            },
-            {
-                "question": "景区内有餐饮服务吗？",
-                "answer": "景区内设有素斋馆、咖啡厅及多个小吃售卖点，提供素食、简餐及特色小吃。"
-            },
-            {
-                "question": "儿童和老人有优惠政策吗？",
-                "answer": "6周岁以下或身高1.4米以下儿童免费；60-69周岁老人半价；70周岁以上老人免费。"
-            },
-            {
-                "question": "遇到紧急情况怎么办？",
-                "answer": "请立即拨打景区急救电话400-828-8888转1，或联系就近的工作人员寻求帮助。"
-            },
-            {
-                "question": "可以携带宠物入园吗？",
-                "answer": "除导盲犬外，景区内禁止携带宠物入园。"
-            }
-        ]
+        "faqs": faqs,
     }

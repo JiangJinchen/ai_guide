@@ -11,7 +11,6 @@
       <view class="status-dot"></view>
       <view class="location-copy">
         <text class="location-title">{{ statusTitle }}</text>
-        <text class="location-desc">{{ statusDescription }}</text>
       </view>
       <view class="location-actions">
         <view class="icon-btn-small" :class="{ spinning: locationStatus === 'loading' }" @click.stop="refreshLocation">
@@ -35,14 +34,24 @@
         </view>
         <view
           class="map-point"
-          :class="['point-' + point.kind, 'point-' + point.type]"
+          :class="['point-' + point.kind, 'point-' + point.type, { active: isMapPointActive(point), cluster: point.kind === 'cluster' }]"
           v-for="point in mapPoints"
-          :key="point.kind + '-' + point.id"
+          :key="point.key"
           :style="point.style"
           @click="openMapPoint(point)"
         >
           <text>{{ point.label }}</text>
+          <view class="point-bubble" v-if="point.showName">
+            <text>{{ point.name }}</text>
+          </view>
         </view>
+      </view>
+      <view class="map-active-card" v-if="activeMapPoint">
+        <view class="map-active-main">
+          <text class="map-active-title">{{ activeMapPoint.name }}</text>
+          <text class="map-active-meta">{{ activeMapPoint.distanceText || activeMapPoint.summary }}</text>
+        </view>
+        <text class="map-active-action" @click="handleActiveMapPointAction">{{ activeMapPoint.actionText }}</text>
       </view>
       <view class="map-caption">
         <text>{{ mapCaption }}</text>
@@ -57,8 +66,11 @@
 
       <view
         class="service-row"
+        :class="{ active: isListItemActive(item, 'service') }"
         v-for="item in sortedServicePoints"
-        :key="item.id"
+        :key="mapItemKey(item, 'service')"
+        :id="mapItemDomId(item, 'service')"
+        @click="selectMapItem(item, 'service')"
       >
         <view class="service-icon" :class="'service-' + item.type">
           <text>{{ item.icon }}</text>
@@ -99,9 +111,11 @@
 
       <view
         class="spot-row"
+        :class="{ active: isListItemActive(spot, 'spot') }"
         v-for="spot in filteredSpots"
         :key="spot.id"
-        @click="goToGuide(spot.id)"
+        :id="mapItemDomId(spot, 'spot')"
+        @click="selectMapItem(spot, 'spot')"
       >
         <view class="spot-thumb" :class="'spot-' + spot.type">
           <text>{{ spot.typeLabel.slice(0, 1) }}</text>
@@ -142,7 +156,6 @@
             <view class="location-check">{{ isLocationActive(spot) ? '✓' : '' }}</view>
             <view class="location-info">
               <text class="location-name">{{ spot.spot_name || spot.name }}</text>
-              <text class="location-coord">{{ formatCoordinate(spot.latitude) }}，{{ formatCoordinate(spot.longitude) }}</text>
             </view>
           </view>
           <view class="empty-state" v-if="allSpots.length === 0">
@@ -224,6 +237,7 @@ export default {
       allSpots: [],
       backendNearbySpots: [],
       selectedDistance: 1000,
+      selectedMapPointKey: '',
       showLocationSelector: false,
       distanceOptions: [
         { label: '500m内', value: 500 },
@@ -243,14 +257,7 @@ export default {
     statusTitle() {
       if (this.locationStatus === 'loading') return '正在获取您的实时位置'
       if (this.locationStatus === 'success') return '定位成功'
-      return '定位失败'
-    },
-    statusDescription() {
-      if (this.locationStatus === 'loading') return '正在获取您的实时位置，更新周边点位距离...'
-      if (this.locationStatus === 'success') {
-        return `当前位置 ${this.locationMessage}`
-      }
-      return '请检查定位授权，或走到开阔地段后手动刷新'
+      return '定位失败，请检查定位授权，或走到开阔地段后手动刷新'
     },
     mapCaption() {
       if (!this.hasLocation) return '地图已定位到灵山胜境游客中心，获取定位后会自动切换到您的当前位置'
@@ -259,18 +266,72 @@ export default {
     userMapStyle() {
       return 'left: 50%; top: 50%;'
     },
+    mapRangeMeters() {
+      if (this.selectedDistance === 'all') {
+        const distances = [...this.sortedServicePoints, ...this.filteredSpots]
+          .map(item => Number(item.distance))
+          .filter(Number.isFinite)
+        const maxDistance = distances.length ? Math.max(...distances) : 900
+        return Math.max(900, Math.min(3000, Math.ceil(maxDistance * 1.15)))
+      }
+      return Math.max(500, Number(this.selectedDistance || 900))
+    },
+    mapServicePoints() {
+      const range = this.mapRangeMeters
+      const points = this.sortedServicePoints
+        .filter(item => this.selectedDistance === 'all' || item.distance <= range)
+        .slice(0, 3)
+      const selected = this.sortedServicePoints.find(item => this.mapItemKey(item, 'service') === this.selectedMapPointKey)
+      if (selected && !points.some(item => this.mapItemKey(item, 'service') === this.selectedMapPointKey)) {
+        points.push(selected)
+      }
+      return points
+    },
+    mapSpotPoints() {
+      const points = this.filteredSpots.slice(0, 5)
+      const selected = this.filteredSpots.find(item => this.mapItemKey(item, 'spot') === this.selectedMapPointKey)
+      if (selected && !points.some(item => this.mapItemKey(item, 'spot') === this.selectedMapPointKey)) {
+        points.push(selected)
+      }
+      return points
+    },
+    mapHiddenCount() {
+      return Math.max(0, this.sortedServicePoints.length - this.mapServicePoints.length) +
+        Math.max(0, this.filteredSpots.length - this.mapSpotPoints.length)
+    },
     mapPoints() {
-      const services = this.sortedServicePoints.slice(0, 6).map(item => ({
+      const services = this.mapServicePoints.map(item => ({
         ...item,
         kind: 'service',
-        label: item.icon
+        label: item.icon,
+        key: this.mapItemKey(item, 'service')
       }))
-      const spots = this.filteredSpots.slice(0, 8).map(item => ({
+      const spots = this.mapSpotPoints.map(item => ({
         ...item,
         kind: 'spot',
-        label: item.name.slice(0, 1)
+        label: this.spotMapIcon(item),
+        key: this.mapItemKey(item, 'spot')
       }))
-      return this.createMapPoints([...services, ...spots])
+      return this.clusterMapPoints(this.createMapPoints([...services, ...spots]))
+    },
+    activeMapPoint() {
+      if (!this.selectedMapPointKey) return null
+      const flatPoints = this.mapPoints.flatMap(point => point.children || [point])
+      const point = flatPoints.find(item => item.key === this.selectedMapPointKey) ||
+        this.mapPoints.find(item => item.key === this.selectedMapPointKey)
+      if (!point) return null
+      if (point.kind === 'cluster') {
+        return {
+          ...point,
+          name: `${point.children.length} 个位置较近`,
+          summary: point.children.slice(0, 3).map(item => item.name).join('、'),
+          actionText: '查看最近'
+        }
+      }
+      return {
+        ...point,
+        actionText: point.kind === 'service' ? '导航' : '详情'
+      }
     },
     sortedServicePoints() {
       if (!this.hasLocation) return []
@@ -453,25 +514,123 @@ export default {
     },
     createMapPoints(points) {
       const center = this.userLocation || DEFAULT_LOCATION
-      return points.map(point => {
-        const position = this.toMapPosition(center, point)
-        return {
-          ...point,
-          style: `left: ${position.x}%; top: ${position.y}%;`
-        }
-      })
+      return points
+        .map(point => {
+          const position = this.toMapPosition(center, point)
+          if (!position) return null
+          const isSelected = this.mapItemKey(point, point.kind) === this.selectedMapPointKey
+          return {
+            ...point,
+            ...position,
+            key: this.mapItemKey(point, point.kind),
+            domId: this.mapItemDomId(point, point.kind),
+            showName: isSelected,
+            style: `left: ${position.x}%; top: ${position.y}%;`
+          }
+        })
+        .filter(Boolean)
     },
     toMapPosition(center, point) {
       const meterPerLat = 111000
       const meterPerLon = 111000 * Math.cos(center.latitude * Math.PI / 180)
       const dx = (point.longitude - center.longitude) * meterPerLon
       const dy = (point.latitude - center.latitude) * meterPerLat
-      const range = 900
-      const x = Math.max(8, Math.min(92, 50 + (dx / range) * 42))
-      const y = Math.max(8, Math.min(92, 50 - (dy / range) * 42))
+      const range = this.mapRangeMeters
+      const rawX = 50 + (dx / range) * 42
+      const rawY = 50 - (dy / range) * 42
+      if (rawX < 4 || rawX > 96 || rawY < 4 || rawY > 96) return null
+      const x = Math.max(8, Math.min(92, rawX))
+      const y = Math.max(8, Math.min(92, rawY))
       return { x: Math.round(x), y: Math.round(y) }
     },
+    clusterMapPoints(points) {
+      const groups = []
+      points.forEach(point => {
+        if (point.key === this.selectedMapPointKey) {
+          groups.push({ x: point.x, y: point.y, children: [point], locked: true })
+          return
+        }
+        const group = groups.find(item => {
+          return !item.locked && Math.abs(item.x - point.x) < 8 && Math.abs(item.y - point.y) < 8
+        })
+        if (group) {
+          group.children.push(point)
+          group.x = Math.round(group.children.reduce((sum, item) => sum + item.x, 0) / group.children.length)
+          group.y = Math.round(group.children.reduce((sum, item) => sum + item.y, 0) / group.children.length)
+        } else {
+          groups.push({ x: point.x, y: point.y, children: [point], locked: false })
+        }
+      })
+
+      return groups.map(group => {
+        if (group.children.length === 1) return group.children[0]
+        const key = `cluster-${group.children.map(item => item.key).join('-')}`
+        return {
+          id: key,
+          key,
+          kind: 'cluster',
+          type: 'cluster',
+          label: String(group.children.length),
+          x: group.x,
+          y: group.y,
+          children: group.children,
+          style: `left: ${group.x}%; top: ${group.y}%;`
+        }
+      })
+    },
+    spotMapIcon(item) {
+      const icons = {
+        scenic: '景',
+        checkin: '拍',
+        culture: '文',
+        performance: '演'
+      }
+      return icons[item.type] || '景'
+    },
+    mapItemKey(item, kind) {
+      return `${kind}-${item.id || item.name}-${Number(item.latitude).toFixed(6)}-${Number(item.longitude).toFixed(6)}`
+    },
+    mapItemDomId(item, kind) {
+      return this.mapItemKey(item, kind).replace(/[^a-zA-Z0-9_-]/g, '-')
+    },
+    isMapPointActive(point) {
+      if (point.kind === 'cluster') return point.key === this.selectedMapPointKey
+      return point.key === this.selectedMapPointKey
+    },
+    isListItemActive(item, kind) {
+      return this.mapItemKey(item, kind) === this.selectedMapPointKey
+    },
+    selectMapItem(item, kind) {
+      this.selectedMapPointKey = this.mapItemKey(item, kind)
+    },
+    scrollToMapItem(point) {
+      if (!point.domId) return
+      this.$nextTick(() => {
+        uni.pageScrollTo({
+          selector: `#${point.domId}`,
+          duration: 240
+        })
+      })
+    },
     openMapPoint(point) {
+      if (point.kind === 'cluster') {
+        this.selectedMapPointKey = point.key
+        return
+      }
+      this.selectedMapPointKey = point.key
+      this.scrollToMapItem(point)
+    },
+    handleActiveMapPointAction() {
+      const point = this.activeMapPoint
+      if (!point) return
+      if (point.kind === 'cluster') {
+        const first = point.children?.[0]
+        if (first) {
+          this.selectedMapPointKey = first.key
+          this.scrollToMapItem(first)
+        }
+        return
+      }
       if (point.kind === 'service') {
         this.openNavigation(point)
         return
@@ -491,7 +650,7 @@ export default {
       })
     },
     goToGuide(id) {
-      uni.navigateTo({ url: `/pages/guide/index?spot_id=${id}` })
+      uni.navigateTo({ url: `/pages/spot-detail/index?spot_id=${id}` })
     }
   }
 }
@@ -518,7 +677,6 @@ export default {
 .page-title,
 .page-subtitle,
 .location-title,
-.location-desc,
 .section-title,
 .item-name,
 .item-meta,
@@ -595,13 +753,6 @@ export default {
   color: #4b2b1f;
   font-size: 28rpx;
   font-weight: 850;
-}
-
-.location-desc {
-  margin-top: 8rpx;
-  color: #7c6a57;
-  font-size: 23rpx;
-  line-height: 1.45;
 }
 
 .manual-btn {
@@ -711,6 +862,33 @@ export default {
   font-size: 22rpx;
 }
 
+.map-point.active {
+  z-index: 5;
+  width: 58rpx;
+  height: 58rpx;
+  border: 4rpx solid #fff7e6;
+}
+
+.map-point.cluster {
+  background: #3f2c20;
+}
+
+.point-bubble {
+  position: absolute;
+  left: 50%;
+  bottom: 64rpx;
+  transform: translateX(-50%);
+  max-width: 260rpx;
+  padding: 10rpx 14rpx;
+  border-radius: 10rpx;
+  background: rgba(255, 248, 232, 0.96);
+  color: #3f2c20;
+  font-size: 22rpx;
+  line-height: 1.3;
+  white-space: nowrap;
+  box-shadow: 0 8rpx 20rpx rgba(66, 42, 23, 0.16);
+}
+
 .point-service {
   background: #415646;
 }
@@ -737,6 +915,48 @@ export default {
 .point-food,
 .point-performance {
   background: #c19148;
+}
+
+.map-active-card {
+  display: flex;
+  align-items: center;
+  gap: 18rpx;
+  padding: 18rpx 22rpx;
+  border-top: 1rpx solid rgba(120, 72, 37, 0.1);
+  background: #fff8e8;
+}
+
+.map-active-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.map-active-title,
+.map-active-meta {
+  display: block;
+}
+
+.map-active-title {
+  color: #3f2c20;
+  font-size: 27rpx;
+  font-weight: 850;
+}
+
+.map-active-meta {
+  margin-top: 6rpx;
+  color: #8c765e;
+  font-size: 22rpx;
+  line-height: 1.35;
+}
+
+.map-active-action {
+  flex-shrink: 0;
+  padding: 10rpx 16rpx;
+  border-radius: 999rpx;
+  background: #8b2d22;
+  color: #fff7e6;
+  font-size: 22rpx;
+  font-weight: 800;
 }
 
 .map-caption {
@@ -777,6 +997,15 @@ export default {
   align-items: center;
   padding: 22rpx 0;
   border-bottom: 1rpx solid rgba(120, 72, 37, 0.1);
+}
+
+.service-row.active,
+.spot-row.active {
+  margin: 0 -12rpx;
+  padding-left: 12rpx;
+  padding-right: 12rpx;
+  border-radius: 10rpx;
+  background: #fff3d9;
 }
 
 .service-row:last-child,

@@ -1,7 +1,7 @@
 from threading import Lock
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 router = APIRouter()
@@ -15,6 +15,8 @@ _state = {
 
 
 class ReindexRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     sync_chunks: bool = True
     sync_embeddings: bool = True
     build_faiss: bool = False

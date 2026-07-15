@@ -156,7 +156,7 @@ def get_cache_max_entries() -> int:
 
 
 def get_rerank_enabled() -> bool:
-    return _get_bool("RAG_RERANK_ENABLED", default=False)
+    return _get_bool("RAG_RERANK_ENABLED", default=True)
 
 
 def get_rerank_model_name() -> str:
@@ -169,7 +169,7 @@ def get_rerank_model_name() -> str:
 def get_rerank_candidate_count() -> int:
     return _get_bounded_int(
         "RAG_RERANK_CANDIDATES",
-        default=20,
+        default=12,
         minimum=3,
         maximum=100,
     )
