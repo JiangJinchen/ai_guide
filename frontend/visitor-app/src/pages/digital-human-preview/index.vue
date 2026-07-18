@@ -180,4 +180,27 @@ export default {
   color: #172024;
   font-weight: 700;
 }
+
+@media screen and (max-width: 380px) {
+  .preview-page {
+    grid-template-rows: auto minmax(360px, 1fr) auto;
+  }
+
+  .preview-header {
+    gap: 12rpx;
+    padding: 22rpx 20rpx;
+  }
+
+  .preview-stage {
+    min-height: 360px;
+  }
+
+  .preview-controls {
+    padding: 18rpx 18rpx 24rpx;
+  }
+
+  .segmented-control {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 </style>

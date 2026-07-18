@@ -567,22 +567,22 @@ export default {
 
 .preference-chart-wrap {
   position: relative;
-  width: 180px;
-  height: 180px;
+  width: 320rpx;
+  height: 320rpx;
   margin: 6rpx auto 4rpx;
 }
 
 .preference-canvas {
-  width: 180px;
-  height: 180px;
+  width: 320rpx;
+  height: 320rpx;
 }
 
 .preference-center {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 112px;
-  height: 112px;
+  width: 200rpx;
+  height: 200rpx;
   transform: translate(-50%, -50%);
   display: flex;
   flex-direction: column;
@@ -723,5 +723,31 @@ export default {
   text-align: center;
   color: #b39a7a;
   font-size: 22rpx;
+}
+
+@media screen and (max-width: 380px) {
+  .preference-chart-wrap,
+  .preference-canvas {
+    width: 280rpx;
+    height: 280rpx;
+  }
+
+  .preference-center {
+    width: 176rpx;
+    height: 176rpx;
+  }
+
+  .preference-center-label,
+  .pin-name {
+    max-width: 120rpx;
+  }
+
+  .menu-row {
+    gap: 12rpx;
+  }
+
+  .footprint-map {
+    height: 280rpx;
+  }
 }
 </style>

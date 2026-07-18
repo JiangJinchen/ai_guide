@@ -1012,6 +1012,14 @@ export default {
   pointer-events: none;
 }
 
+@media screen and (max-width: 380px) {
+  .floating-human {
+    right: 10rpx;
+    width: 140rpx;
+    height: 180rpx;
+  }
+}
+
 .human-frame {
   width: 100%;
   height: 100%;

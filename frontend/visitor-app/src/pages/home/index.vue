@@ -633,6 +633,85 @@ export default {
   flex: 1;
 }
 
+@media screen and (max-width: 380px) {
+  .home-page {
+    padding: 20rpx 18rpx 40rpx;
+  }
+
+  .hero {
+    height: 440rpx;
+  }
+
+  .hero-copy {
+    left: 28rpx;
+    right: 28rpx;
+    top: 36rpx;
+  }
+
+  .hero-title {
+    font-size: 46rpx;
+  }
+
+  .hero-desc {
+    max-width: 100%;
+    font-size: 24rpx;
+  }
+
+  .service-dock {
+    left: 18rpx;
+    right: 18rpx;
+    height: auto;
+    flex-wrap: wrap;
+  }
+
+  .service-group,
+  .service-group.active {
+    width: 100%;
+    min-width: 0;
+    flex: 0 0 100%;
+  }
+
+  .group-tab {
+    width: 100%;
+    min-width: 0;
+    flex-direction: row;
+    gap: 12rpx;
+    padding: 16rpx 18rpx;
+    justify-content: flex-start;
+  }
+
+  .group-icon {
+    margin-bottom: 0;
+  }
+
+  .group-services {
+    padding: 14rpx 18rpx 16rpx;
+  }
+
+  .service-panel {
+    padding: 20rpx;
+  }
+
+  .service-grid,
+  .hot-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .hot-card {
+    min-height: 220rpx;
+  }
+
+  .notice-row {
+    flex-wrap: wrap;
+  }
+
+  .notice-time {
+    width: auto;
+    min-width: 86rpx;
+    margin-bottom: 8rpx;
+  }
+}
+
 .group-tab {
   width: 116rpx;
   min-width: 116rpx;

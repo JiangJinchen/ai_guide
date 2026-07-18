@@ -1,4 +1,4 @@
-﻿const BASE_URL = '/api'
+﻿const BASE_URL = 'http://192.168.208.6:8000/api'
 
 const normalizeUrl = (url) => {
   if (url.startsWith('/visitor/') || url.startsWith('/admin/') || url.startsWith('/ai/')) {

@@ -1363,6 +1363,71 @@ export default {
   font-size: 26rpx;
 }
 
+@media screen and (max-width: 380px) {
+  .map-section {
+    height: 420rpx;
+    min-height: 420rpx;
+  }
+
+  .user-dot {
+    width: 60rpx;
+    height: 60rpx;
+    font-size: 22rpx;
+  }
+
+  .route-marker {
+    width: 48rpx;
+    height: 48rpx;
+    font-size: 21rpx;
+  }
+
+  .stats-bar {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 8rpx 16rpx;
+    padding: 16rpx;
+  }
+
+  .deviation-bar,
+  .segment-list-head {
+    flex-wrap: wrap;
+  }
+
+  .action-bar {
+    grid-template-columns: 1fr;
+    padding-top: 18rpx;
+  }
+
+  .route-summary,
+  .empty-state,
+  .segment-list-head,
+  .segment-swipe {
+    margin-left: 18rpx;
+    margin-right: 18rpx;
+  }
+
+  .segment-card {
+    padding: 20rpx;
+  }
+
+  .segment-actions {
+    width: 72rpx;
+  }
+
+  .drag-handle {
+    width: 48rpx;
+    margin-left: 6rpx;
+  }
+
+  .popup-actions {
+    flex-direction: column;
+  }
+
+  .popup-btn {
+    min-height: 76rpx;
+  }
+}
+
 .popup-mask {
   position: fixed;
   inset: 0;

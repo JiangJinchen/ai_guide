@@ -1366,10 +1366,58 @@ export default {
 }
 
 .empty-state {
-  min-width: 360rpx;
+  width: 100%;
+  min-width: 0;
   text-align: center;
   color: #8b7355;
   font-size: 26rpx;
+}
+
+@media screen and (max-width: 380px) {
+  .map-section {
+    height: 46vh;
+    min-height: 500rpx;
+  }
+
+  .map-status,
+  .summary-head,
+  .section-head,
+  .step-head {
+    flex-wrap: wrap;
+  }
+
+  .quick-actions,
+  .metric-row,
+  .step-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .quick-actions {
+    padding-top: 18rpx;
+  }
+
+  .step-actions {
+    display: grid;
+  }
+
+  .route-summary,
+  .step-card,
+  .waypoint-card,
+  .empty-state,
+  .scenic-notice {
+    margin-left: 18rpx;
+    margin-right: 18rpx;
+  }
+
+  .waypoint-card {
+    align-items: flex-start;
+  }
+
+  .mini-btn,
+  .status-pill,
+  .summary-badge {
+    min-width: 0;
+  }
 }
 </style>
 
