@@ -5,7 +5,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Spot, FAQItem, DigitalHumanConfig, VisitorInteraction, VisitorBehavior, RouteHistory, RouteShare, RouteDistanceCache, SpotVisitMeta, SpotTag, AppUserBehavior, TicketProduct, ScenicActivity, VisitorFeedback
-from app.schemas import SpotResponse, VisitorInteractionResponse, VisitorFeedbackResponse
+from app.schemas import SpotResponse, VisitorInteractionResponse, VisitorFeedbackResponse, ChatSessionResponse
 from app.services.guide_asset_service import get_spot_guide_detail
 from app.utils.validation import normalize_entity_id
 from typing import List, Optional, AsyncGenerator
@@ -181,6 +181,7 @@ from collections import deque
 AMAP_API_CALLS = deque()
 AMAP_QPS_LIMIT = 5
 AMAP_TIME_WINDOW = 1
+ROUTE_CACHE_COORD_PRECISION = 4
 
 def amap_rate_limited(func):
     def wrapper(*args, **kwargs):
@@ -197,6 +198,9 @@ def amap_rate_limited(func):
         AMAP_API_CALLS.append(time.time())
         return func(*args, **kwargs)
     return wrapper
+
+def normalize_cache_coordinate(value, precision=ROUTE_CACHE_COORD_PRECISION):
+    return round(float(value), precision)
 
 router = APIRouter()
 
@@ -484,10 +488,12 @@ REMOTE_EMOTION_ENABLED = os.getenv("REMOTE_EMOTION_ENABLED", "false").strip().lo
     "1", "true", "yes", "on"
 }
 AI_API_KEY = os.getenv("AI_API_KEY", "")
-QWEN_API_URL = "https://apihub.agnes-ai.com/v1/chat/completions"
-QWEN_MODEL = "agnes-2.0-flash"
-EMOTION_LLM_URL = os.getenv("EMOTION_LLM_URL", QWEN_API_URL)
-EMOTION_LLM_MODEL = os.getenv("EMOTION_LLM_MODEL", QWEN_MODEL)
+AI_API_URL = os.getenv("AI_API_URL", "https://apihub.agnes-ai.com/v1/chat/completions")
+AI_MODEL = os.getenv("AI_MODEL", "agnes-2.0-flash")
+QWEN_API_URL = AI_API_URL
+QWEN_MODEL = AI_MODEL
+EMOTION_LLM_URL = os.getenv("EMOTION_LLM_URL", AI_API_URL)
+EMOTION_LLM_MODEL = os.getenv("EMOTION_LLM_MODEL", AI_MODEL)
 EMOTION_LLM_API_KEY = os.getenv("EMOTION_LLM_API_KEY", AI_API_KEY)
 try:
     EMOTION_LLM_TIMEOUT = max(0.8, float(os.getenv("EMOTION_LLM_TIMEOUT", "2.0")))
@@ -498,6 +504,17 @@ AMAP_DISTANCE_URL = "https://restapi.amap.com/v3/distance"
 AMAP_WALKING_URL = "https://restapi.amap.com/v3/direction/walking"
 AMAP_GEOCODE_URL = "https://restapi.amap.com/v3/geocode/geo"
 AMAP_PLACE_AROUND_URL = "https://restapi.amap.com/v3/place/around"
+try:
+    AMAP_NAVIGATION_TIMEOUT_SECONDS = max(1.2, float(os.getenv("AMAP_NAVIGATION_TIMEOUT_SECONDS", "2.5")))
+except (TypeError, ValueError):
+    AMAP_NAVIGATION_TIMEOUT_SECONDS = 2.5
+SCENIC_ENTRANCE_FALLBACK = {
+    "latitude": 31.42892,
+    "longitude": 120.09487,
+    "name": "灵山胜境游客中心",
+    "address": "无锡灵山胜境游客中心",
+    "source": "local_config"
+}
 
 EMOTION_EXPRESSION_MAP = {
     "negative": "Sad",
@@ -518,6 +535,15 @@ STATUS_MOTION_MAP = {
 _BAIDU_TOKEN_CACHE = {"value": "", "expires_at": 0.0}
 _BAIDU_TOKEN_LOCK = asyncio.Lock()
 _BAIDU_EMOTION_BLOCKED_UNTIL = 0.0
+
+
+def mask_secret(value: str, keep: int = 4) -> str:
+    if not value:
+        return "<empty>"
+    if len(value) <= keep * 2:
+        return "*" * len(value)
+    return f"{value[:keep]}...{value[-keep:]}"
+
 
 def resolve_digital_human_expression(emotion: str) -> str:
     return EMOTION_EXPRESSION_MAP.get(emotion or "neutral", "Normal")
@@ -680,7 +706,7 @@ NEARBY_SERVICE_POINTS = [
     {"id": "toilet-10", "name": "佛手广场卫生间", "type": "toilet", "desc": "佛手广场卫生间", "latitude": 31.426747, "longitude": 120.097624},
     {"id": "toilet-11", "name": "九龙灌浴卫生间", "type": "toilet", "desc": "九龙灌浴卫生间", "latitude": 31.424188, "longitude": 120.098569},
 
-    {"id": "center-1", "name": "游客服务中心", "type": "center", "desc": "景区综合服务中心", "latitude": 31.43039, "longitude": 120.09658},
+    {"id": "center-1", "name": "游客服务中心", "type": "center", "desc": "景区综合服务中心", "latitude": 31.420196, "longitude": 120.103651},
     {"id": "center-2", "name": "售票处", "type": "center", "desc": "景区售票处", "latitude": 31.420119, "longitude": 120.102935},
     {"id": "center-3", "name": "观光车售票处", "type": "center", "desc":"观光车售票处", "latitude": 31.420176, "longitude": 120.103123},
     {"id": "center-4", "name": "灵山胜境南门", "type": "center", "desc":"灵山胜境南门入口", "latitude": 31.420502, "longitude": 120.103079},
@@ -865,10 +891,6 @@ def get_spot_guide(spot_id: int, db: Session = Depends(get_db)):
     guide_detail = get_spot_guide_detail(db, spot_id, "standard", "female")
     audio_url = guide_detail.get("guide_asset", {}).get("audio_url", "") if guide_detail else ""
     
-    print(f"[AUDIO DEBUG] get_spot_guide called for spot_id={spot_id}")
-    print(f"[AUDIO DEBUG] guide_detail: {guide_detail}")
-    print(f"[AUDIO DEBUG] audio_url: {audio_url}")
-    
     return {
         "spot_id": spot_id,
         "scenic_area": spot.scenic_area_name,
@@ -964,13 +986,56 @@ async def chat(request: MessageRequest, db: Session = Depends(get_db)):
 # ==============================
 # 5. 对话历史接口
 # ==============================
-@router.get("/chat/history", response_model=List[VisitorInteractionResponse])
-def get_chat_history(user_id: str, db: Session = Depends(get_db)):
-    """获取用户和AI的对话历史"""
-    history = db.query(VisitorInteraction)\
+@router.get("/chat/sessions", response_model=List[ChatSessionResponse])
+def get_chat_sessions(
+    user_id: str,
+    limit: int = Query(20, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    rows = db.query(VisitorInteraction)\
         .filter(VisitorInteraction.visitor_id == user_id)\
         .filter(VisitorInteraction.interaction_type == "chat")\
+        .filter(VisitorInteraction.session_id.isnot(None))\
         .order_by(VisitorInteraction.created_at.desc())\
+        .all()
+
+    grouped = {}
+    for row in rows:
+        session_id = (row.session_id or "").strip()
+        if not session_id:
+            continue
+        grouped.setdefault(session_id, []).append(row)
+
+    sessions = []
+    for session_id, items in grouped.items():
+        latest = items[0]
+        oldest = items[-1]
+        first_question = next((item.content for item in reversed(items) if item.content), "") or "未命名会话"
+        preview_source = latest.reply_text or latest.content or first_question
+        preview = str(preview_source).strip().replace("\n", " ")
+        sessions.append(ChatSessionResponse(
+            session_id=session_id,
+            title=(first_question[:18] or "未命名会话"),
+            preview=preview[:60],
+            turn_count=len(items),
+            started_at=oldest.created_at,
+            updated_at=latest.created_at,
+            latest_message_at=latest.created_at,
+        ))
+
+    sessions.sort(key=lambda item: item.latest_message_at or datetime.min, reverse=True)
+    return sessions[:limit]
+
+
+@router.get("/chat/history", response_model=List[VisitorInteractionResponse])
+def get_chat_history(user_id: str, session_id: Optional[str] = None, db: Session = Depends(get_db)):
+    """获取用户和AI的对话历史"""
+    query = db.query(VisitorInteraction)\
+        .filter(VisitorInteraction.visitor_id == user_id)\
+        .filter(VisitorInteraction.interaction_type == "chat")
+    if session_id:
+        query = query.filter(VisitorInteraction.session_id == session_id)
+    history = query.order_by(VisitorInteraction.created_at.desc())\
         .all()
     return history
 
@@ -2218,8 +2283,8 @@ def estimate_segment_minutes(distance_m, travel_mode):
 def route_cache_key(origin_lat, origin_lng, destination_lat, destination_lng, travel_mode, provider="amap"):
     return (
         f"{provider}:{normalize_travel_mode(travel_mode)}:"
-        f"{round(float(origin_lng), 6)},{round(float(origin_lat), 6)}>"
-        f"{round(float(destination_lng), 6)},{round(float(destination_lat), 6)}"
+        f"{normalize_cache_coordinate(origin_lng)},{normalize_cache_coordinate(origin_lat)}>"
+        f"{normalize_cache_coordinate(destination_lng)},{normalize_cache_coordinate(destination_lat)}"
     )
 
 def local_segment_metrics(lat1, lon1, lat2, lon2, travel_mode):
@@ -2292,6 +2357,7 @@ def save_segment_metrics_cache(
         db.rollback()
         print(f"[ROUTE] 距离缓存写入失败，跳过缓存: {str(e)}")
 
+@amap_rate_limited
 def fetch_amap_walking_distance(origin_lat, origin_lng, destination_lat, destination_lng):
     if not AMAP_WEB_KEY:
         return None
@@ -2473,7 +2539,7 @@ def local_navigation_segment(origin, destination, travel_mode):
     }
 
 @amap_rate_limited
-def fetch_amap_walking_navigation(origin, destination, timeout_seconds=5.0):
+def fetch_amap_walking_navigation(origin, destination, timeout_seconds=AMAP_NAVIGATION_TIMEOUT_SECONDS):
     if not AMAP_WEB_KEY:
         logger.info("[AMAP] 高德API密钥未配置，跳过高德导航")
         return None
@@ -2493,7 +2559,14 @@ def fetch_amap_walking_navigation(origin, destination, timeout_seconds=5.0):
     }
 
     try:
-        with httpx.Client(timeout=timeout_seconds, verify=False) as client:
+        timeout = httpx.Timeout(
+            timeout_seconds,
+            connect=min(1.2, timeout_seconds),
+            read=timeout_seconds,
+            write=min(1.2, timeout_seconds),
+            pool=min(1.0, timeout_seconds),
+        )
+        with httpx.Client(timeout=timeout, verify=False) as client:
             response = client.get(AMAP_WALKING_URL, params=params)
             response.raise_for_status()
             payload = response.json()
@@ -2707,8 +2780,17 @@ def build_navigation_route(request: NavigationRouteRequest):
     segments = []
     providers = []
     previous = start
+    amap_disabled_for_request = request.provider != "amap"
     for index, destination in enumerate(waypoints):
-        segment = fetch_amap_walking_navigation(previous, destination) if request.provider == "amap" else None
+        segment = None
+        if not amap_disabled_for_request:
+            segment = fetch_amap_walking_navigation(previous, destination)
+            if not segment:
+                amap_disabled_for_request = True
+                logger.warning(
+                    "[NAV] amap disabled for remaining segments after segment %s failed; use local fallback for this request",
+                    index + 1
+                )
         if not segment:
             segment = local_navigation_segment(previous, destination, travel_mode)
             logger.info(
@@ -3475,8 +3557,24 @@ async def analyze_emotion_with_llm(text: str) -> Optional[dict]:
             {"role": "system", "content": "你只输出合法JSON。"},
             {"role": "user", "content": prompt}
         ],
-        "temperature": 0
+        "temperature": 0,
+        "max_tokens": 128
     }
+
+    started_at = time.perf_counter()
+    print(
+        "[EMOTION] LLM request:",
+        json.dumps(
+            {
+                "url": EMOTION_LLM_URL,
+                "model": EMOTION_LLM_MODEL,
+                "timeout": EMOTION_LLM_TIMEOUT,
+                "key": mask_secret(EMOTION_LLM_API_KEY),
+                "text": text[:120],
+            },
+            ensure_ascii=False,
+        ),
+    )
 
     try:
         response = await http_client.post(
@@ -3484,16 +3582,52 @@ async def analyze_emotion_with_llm(text: str) -> Optional[dict]:
             headers=headers,
             json=payload,
             timeout=httpx.Timeout(
-                connect=min(1.0, EMOTION_LLM_TIMEOUT),
+                connect=EMOTION_LLM_TIMEOUT,
                 read=EMOTION_LLM_TIMEOUT,
                 write=EMOTION_LLM_TIMEOUT,
-                pool=min(1.0, EMOTION_LLM_TIMEOUT),
+                pool=EMOTION_LLM_TIMEOUT,
             ),
         )
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        print(f"[EMOTION] LLM response status={response.status_code} elapsed_ms={elapsed_ms:.1f}")
+        if response.status_code >= 400:
+            print(f"[EMOTION] LLM error body: {response.text[:1000]}")
         response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"].strip()
-        match = re.search(r"\{.*\}", content, re.S)
+        payload_json = response.json()
+        print(f"[EMOTION] LLM raw response: {json.dumps(payload_json, ensure_ascii=False)[:1200]}")
+        choice = (payload_json.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        finish_reason = choice.get("finish_reason")
+        content = message.get("content", "")
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict)
+            )
+        reasoning_content = message.get("reasoning_content", "")
+        if isinstance(reasoning_content, list):
+            reasoning_content = "".join(
+                part.get("text", "")
+                for part in reasoning_content
+                if isinstance(part, dict)
+            )
+        content = str(content).strip()
+        reasoning_content = str(reasoning_content).strip()
+        raw_text = content or reasoning_content
+        match = re.search(r"\{.*\}", raw_text, re.S)
         if not match:
+            print(
+                "[EMOTION] LLM response missing JSON object:",
+                json.dumps(
+                    {
+                        "finish_reason": finish_reason,
+                        "content": content[:300],
+                        "reasoning_content": reasoning_content[:300],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
             return None
         result = json.loads(match.group(0))
         emotion = result.get("emotion", "neutral")
@@ -3501,7 +3635,7 @@ async def analyze_emotion_with_llm(text: str) -> Optional[dict]:
             emotion = "neutral"
         return {
             "emotion": emotion,
-            "score": float(result.get("score", 0.8) or 0.8),
+            "score": float(0.8 if result.get("score") is None else result.get("score")),
             "reason": str(result.get("reason", "")),
             "source": "llm"
         }
@@ -3514,6 +3648,13 @@ async def analyze_emotion_with_llm(text: str) -> Optional[dict]:
 # ======================
 @router.get("/scenic/entrance")
 def get_scenic_entrance():
+    live_geocode = os.getenv("AMAP_SCENIC_ENTRANCE_LIVE_GEOCODE", "").strip().lower()
+    if live_geocode not in {"1", "true", "yes", "on"}:
+        return {
+            "success": True,
+            **SCENIC_ENTRANCE_FALLBACK
+        }
+
     geocode_result = fetch_amap_geocode("无锡灵山胜境游客中心")
     
     if geocode_result:
@@ -3527,11 +3668,9 @@ def get_scenic_entrance():
         }
     
     return {
-        "success": False,
-        "latitude": 31.42892,
-        "longitude": 120.09487,
-        "name": "灵山胜境游客中心",
-        "source": "fallback"
+        "success": True,
+        **SCENIC_ENTRANCE_FALLBACK,
+        "source": "fallback_after_geocode_failed"
     }
 
 # ======================

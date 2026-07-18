@@ -3,7 +3,7 @@
     <view class="splash-content">
       <view class="logo-wrapper">
         <view class="logo-circle">
-          <text class="logo-text">灵</text>
+          <image class="logo-img" :src="logo" mode="aspectFit"></image>
         </view>
         <text class="logo-title">灵山胜境</text>
         <text class="logo-subtitle">AI智慧导览</text>
@@ -17,9 +17,11 @@
 </template>
 
 <script>
+import logo from '@/static/logo.png'
 export default {
   data() {
     return {
+      logo,
       progress: 0,
       loadingText: '正在启动...',
       timer: null,
@@ -112,6 +114,12 @@ export default {
   justify-content: center;
   margin-bottom: 30rpx;
   animation: pulse 2s ease-in-out infinite;
+}
+
+.logo-img {
+  width: 120rpx;
+  height: 120rpx;
+  border-radius: 50%;
 }
 
 @keyframes pulse {

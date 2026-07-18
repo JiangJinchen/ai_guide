@@ -7,6 +7,20 @@ const normalizeUrl = (url) => {
   return `/visitor${url.startsWith('/') ? url : `/${url}`}`
 }
 
+const normalizePayload = (payload) => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return payload
+  }
+  const normalized = { ...payload }
+  if (normalized.user_id !== undefined && normalized.user_id !== null) {
+    normalized.user_id = String(normalized.user_id)
+  }
+  if (normalized.session_id !== undefined && normalized.session_id !== null) {
+    normalized.session_id = String(normalized.session_id)
+  }
+  return normalized
+}
+
 export class SSEClient {
   constructor(url, options = {}) {
     this.url = BASE_URL + normalizeUrl(url)
@@ -38,6 +52,7 @@ export class SSEClient {
 
   async send(data) {
     return new Promise((resolve, reject) => {
+      const payload = normalizePayload(data)
       this.xhr = new XMLHttpRequest()
       this.xhr.open('POST', this.url, true)
       this.xhr.setRequestHeader('Content-Type', 'application/json')
@@ -53,6 +68,13 @@ export class SSEClient {
             this.emit('close', { status: this.xhr.status })
             resolve()
           } else {
+            console.error('[sse] http error', {
+              url: this.url,
+              status: this.xhr.status,
+              readyState: this.xhr.readyState,
+              responseText: this.xhr.responseText?.slice(0, 500),
+              headers: this.xhr.getAllResponseHeaders?.()
+            })
             this.emit('error', new Error(`HTTP ${this.xhr.status}`))
             reject(new Error(`HTTP ${this.xhr.status}`))
           }
@@ -60,17 +82,29 @@ export class SSEClient {
       }
       
       this.xhr.onerror = () => {
+        console.error('[sse] network error', {
+          url: this.url,
+          status: this.xhr.status,
+          readyState: this.xhr.readyState,
+          responseText: this.xhr.responseText?.slice(0, 500)
+        })
         this.emit('error', new Error('Network error'))
         reject(new Error('Network error'))
       }
       
       this.xhr.ontimeout = () => {
+        console.error('[sse] timeout', {
+          url: this.url,
+          status: this.xhr.status,
+          readyState: this.xhr.readyState,
+          timeout: this.xhr.timeout
+        })
         this.emit('error', new Error('Timeout'))
         reject(new Error('Timeout'))
       }
       
       this.xhr.timeout = this.options.timeout || 120000
-      this.xhr.send(JSON.stringify(data))
+      this.xhr.send(JSON.stringify(payload))
     })
   }
 

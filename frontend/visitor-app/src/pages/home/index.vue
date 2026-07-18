@@ -2,7 +2,7 @@
   <view class="home-page">
     <view class="top-search">
       <view class="search-box">
-        <text class="search-mark">搜</text>
+        <svg t="1784372367736" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="2788" width="32" height="32"><path d="M843.093333 863.573333L723.626667 716.8c47.786667-47.786667 85.333333-116.053333 92.16-191.146667 20.48-177.493333-105.813333-337.92-286.72-354.986666S194.56 276.48 177.493333 453.973333s105.813333 337.92 286.72 354.986667c75.093333 6.826667 150.186667-10.24 208.213334-47.786667l116.053333 146.773334c6.826667 6.826667 17.066667 13.653333 23.893333 13.653333s17.066667 0 27.306667-6.826667c13.653333-13.653333 13.653333-37.546667 3.413333-51.2z m-372.053333-126.293333c-139.946667-13.653333-238.933333-136.533333-221.866667-276.48 13.653333-139.946667 136.533333-238.933333 276.48-221.866667s238.933333 136.533333 221.866667 276.48-139.946667 238.933333-276.48 221.866667z" fill="#707070" p-id="2789"></path></svg>
         <input
           class="search-input"
           v-model="keyword"
@@ -41,6 +41,7 @@
       >
         <swiper-item v-for="(slide, index) in heroSlides" :key="slide.title">
           <view class="hero-slide" :class="['hero-' + index, { active: activeHero === index }]">
+            <image class="hero-banner-img" :src="slide.img" mode="aspectFill"></image>
             <view class="hero-shade"></view>
             <view class="hero-copy">
               <text class="hero-kicker">{{ slide.kicker }}</text>
@@ -142,15 +143,6 @@
 <script>
 import { get, post } from '@/utils/request'
 
-/*
-const fallbackSpots = [
-  { id: 1, name: '鐏靛北澶т經', summary: '澶箹涔嬫花鐨勫湴鏍囦經鍍忥紝閫傚悎绁堢涓庤繙鐪恒€? },
-  { id: 2, name: '鐏靛北姊靛', summary: '浣涙暀鑹烘湳娈垮爞锛屽缓绛戙€佸鐢讳笌婕斿嚭鐨嗗€煎緱鍋滅暀銆? },
-  { id: 3, name: '涔濋緳鐏屾荡', summary: '缁忓吀鍔ㄦ€佽〃婕斿満鏅紝閫傚悎浜插瓙鍜屽垵鍒版父瀹€? },
-  { id: 4, name: '浜斿嵃鍧涘煄', summary: '钘忎紶浣涙暀鏂囧寲绌洪棿锛岃壊褰╂祿鐑堬紝閫傚悎鎷嶇収鎵撳崱銆? }
-]
-
-*/
 const fallbackSpots = [
   { id: 1, name: '灵山大佛', summary: '江南之花的地标佛像，适合祈福与远眺。' },
   { id: 2, name: '灵山梵宫', summary: '佛教文化艺术殿堂，建筑、壁画与演出的完美融合。' },
@@ -181,6 +173,10 @@ import imgYoukezhongxin from '@/static/images/游客中心.jpg'
 import imgLingshandaZhaoBi from '@/static/images/灵山大照壁.jpg'
 import imgXiangyueHuajie from '@/static/images/香月花街.jpg'
 import imgNianhuatang from '@/static/images/拈花堂.jpg'
+
+import imgBanner1 from '@/static/images/banner1.jpg'
+import imgBanner2 from '@/static/images/banner2.jpg'
+import imgBanner3 from '@/static/images/banner3.jpg'
 
 const SPOT_IMAGES = {
   '灵山大佛': imgLingshandaf,
@@ -217,67 +213,25 @@ export default {
       spots: fallbackSpots,
       spotImages: SPOT_IMAGES,
       defaultImage: imgLingshanshengjing,
-      /*
       heroSlides: [
-        { kicker: '鏃犻敗 澶箹 鐏靛北', title: '涓€鏃ュ叆鑳滃', desc: '娌垮北姘淬€佷經鍏変笌姊甸煶锛屾參娓哥伒灞便€? },
-        { kicker: '姊靛鍗庡僵', title: '瑙佸缓绛戝璇?, desc: '鍦ㄧ┕椤躲€佸鐢讳笌鍏夊奖涔嬮棿鎰熷彈浣涙暀鑹烘湳銆? },
-        { kicker: '绀间經绁堢', title: '鍚竴鍦烘櫒閽?, desc: '浠庝節榫欑亴娴村埌鐏靛北澶т經锛屾姝ョ殕鏈夋晠浜嬨€? }
-      ],
-      */
-      /*
-      serviceGroups: [
         {
-          key: 'student',
-          name: '瀵艰鏈嶅姟',
-          subtitle: '浠庨棶绛斿埌璁茶В锛屾妸鏅尯鏁呬簨浜ょ粰鏅鸿兘瀵兼父',
-          icon: '娓?,
-          summary: '浠庨棶绛斿埌璁茶В锛屾妸鏅尯鏁呬簨浜ょ粰鏅鸿兘瀵兼父銆?,
-          items: [
-            { name: 'AI鏁板瓧浜?, url: '/pages/chat/index', tab: true, desc: '璇煶闂瓟涓庢櫤鑳借瑙? },
-            { name: '鏅偣璁茶В', url: '/pages/guide/index', desc: '鏌ョ湅鏅偣璇︽儏' },
-            { name: '璺嚎瑙勫垝', url: '/pages/route-planning/index', desc: '瀹氬埗娓歌椤哄簭' }
-          ]
+          kicker: '无锡 灵山 胜境',
+          title: '一日入胜境',
+          desc: '灵山秀水、佛像与梵音，尽享悠然。',
+          img: imgBanner1
         },
         {
-          key: 'teacher',
-          name: '娓哥帺鏈嶅姟',
-          subtitle: '瀹夋帓鏇撮『璺殑娓歌浣撻獙',
-          icon: '琛?,
-          summary: '瀹夋帓鏇撮『璺殑娓歌浣撻獙銆?,
-          items: [
-            { name: '闄勮繎鏅偣', url: '/pages/nearby-spots/index', desc: '鍩轰簬瀹氫綅鎺ㄨ崘' },
-            { name: '绁ㄥ姟鍔╂墜', url: '/pages/ticket-assistant/index', desc: '闂ㄧエ涓庤鍏夎溅淇℃伅' },
-            { name: '涓€ф帹鑽?, url: '/pages/recommendation/index', desc: '鎸夊亸濂芥帹鑽愭櫙鐐? },
-          ]
+          kicker: '梵宫华章',
+          title: '见建筑如诗',
+          desc: '在艺术、壁画与光影之间感受佛教文化。',
+          img: imgBanner2
         },
         {
-          key: 'education',
-          name: '娲诲姩鏈嶅姟',
-          subtitle: '婕斿嚭鏃堕棿涓庣淇綋楠?,
-          icon: '绂?,
-          summary: '鑱氬悎婕斿嚭鏃堕棿涓庣淇綋楠屾彁閱掋€?,
-          items: [
-            { name: '婕斿嚭鏃堕棿', url: '/pages/activity-service/index?type=performance', desc: '鏌ョ湅鏈紑濮嬪満娆? },
-            { name: '绂呬慨浣撻獙', url: '/pages/activity-service/index?type=zen', desc: '浣撻獙浠嬬粛涓庣幇鍦烘寚寮? }
-          ]
-        },
-        {
-          key: 'alumni',
-          name: '娓稿鏈嶅姟',
-          subtitle: '绠＄悊涓汉淇℃伅',
-          icon: '瀹?,
-          summary: '绠＄悊涓汉淇℃伅鍏ュ彛銆?,
-          items: [
-            { name: '涓汉涓績', url: '/pages/profile/index', tab: true, desc: '鍋忓ソ鍜岃冻杩? },
-            { name: '鑱旂郴瀹㈡湇', url: '/pages/profile/index', tab: true, desc: '浜哄伐瀹㈡湇鍏ュ彛' }
-          ]
+          kicker: '祈福朝圣',
+          title: '闻一声晨钟',
+          desc: '从六度桥到灵山大佛，步步皆有故事。',
+          img: imgBanner3
         }
-      ],
-      */
-      heroSlides: [
-        { kicker: '无锡 灵山 胜境', title: '一日入胜境', desc: '灵山秀水、佛像与梵音，尽享悠然。' },
-        { kicker: '梵宫华章', title: '见建筑如诗', desc: '在艺术、壁画与光影之间感受佛教文化。' },
-        { kicker: '祈福朝圣', title: '闻一声晨钟', desc: '从六度桥到灵山大佛，步步皆有故事。' }
       ],
       serviceGroups: [
         {
@@ -323,7 +277,7 @@ export default {
           summary: '个人中心和客服入口。',
           items: [
             { name: '个人中心', url: '/pages/profile/index', tab: true, desc: '偏好与足迹' },
-            { name: '联系客服', url: '/pages/profile/index', tab: true, desc: '人工客服入口' }
+            { name: '联系客服', url: '/pages/customer-service/index', desc: '人工客服入口' }
           ]
         }
       ],
@@ -594,39 +548,23 @@ export default {
   overflow: hidden;
 }
 
-.hero-slide::before {
-  content: '';
+.hero-banner-img {
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
   transform: scale(1);
-  transition: transform 4.2s linear;
-  background-size: cover;
-  background-position: center;
+  animation: bannerZoom 4.2s linear infinite;
 }
 
-.hero-slide.active::before {
-  transform: scale(1.2);
-}
-
-.hero-0::before {
-  background:
-    linear-gradient(105deg, rgba(112, 29, 23, 0.84), rgba(112, 29, 23, 0.18) 48%, rgba(17, 44, 43, 0.38)),
-    radial-gradient(circle at 82% 18%, rgba(236, 202, 115, 0.52), transparent 24%),
-    linear-gradient(135deg, #8d3228, #d5a85f 52%, #35534b);
-}
-
-.hero-1::before {
-  background:
-    linear-gradient(105deg, rgba(60, 40, 28, 0.82), rgba(72, 32, 24, 0.28)),
-    repeating-linear-gradient(115deg, rgba(255,255,255,0.16) 0 4rpx, transparent 4rpx 22rpx),
-    linear-gradient(135deg, #61321f, #b28445 55%, #203f3c);
-}
-
-.hero-2::before {
-  background:
-    linear-gradient(105deg, rgba(50, 72, 64, 0.76), rgba(127, 48, 34, 0.32)),
-    radial-gradient(circle at 72% 40%, rgba(247, 220, 138, 0.5), transparent 26%),
-    linear-gradient(135deg, #274a42, #b05a38 58%, #ead092);
+@keyframes bannerZoom {
+  0% {
+    transform: scale(1);
+  }
+  100% {
+    transform: scale(1.2);
+  }
 }
 
 .hero-shade {

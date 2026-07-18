@@ -164,6 +164,7 @@ export default {
       simulationIndex: 0,
       hasReordered: false,
       navigationSessionId: '',
+      navigationRequestSeq: 0,
       isPageActive: true,
       mapScale: 17,
       selectedWaypointKey: '',
@@ -424,7 +425,7 @@ export default {
       
       this.currentLocation = null
       this.fetchScenicEntrance().then(() => {
-        this.fetchNavigationRoute()
+        if (this.isPageActive) this.fetchNavigationRoute()
       })
       return
     }
@@ -434,7 +435,7 @@ export default {
     if (this.navigationPlan) {
       this.currentLocation = this.navigationPlan.start_location || null
       this.fetchScenicEntrance().then(() => {
-        this.fetchNavigationRoute()
+        if (this.isPageActive) this.fetchNavigationRoute()
       })
     }
   },
@@ -443,14 +444,33 @@ export default {
   },
   onHide() {
     this.isPageActive = false
+    this.navigationRequestSeq += 1
+    this.stopRealtimeTracking()
+    uni.hideToast()
     this.showFeedbackModal = false
   },
   onUnload() {
     this.isPageActive = false
+    this.navigationRequestSeq += 1
     this.stopRealtimeTracking()
+    uni.hideToast()
     this.showFeedbackModal = false
   },
   methods: {
+    isNavigationActive() {
+      return this.isPageActive && Boolean(this.navigationPlan)
+    },
+    beginNavigationRequest() {
+      this.navigationRequestSeq += 1
+      return this.navigationRequestSeq
+    },
+    isLatestNavigationRequest(requestSeq) {
+      return this.isNavigationActive() && requestSeq === this.navigationRequestSeq
+    },
+    showNavigationToast(options) {
+      if (!this.isNavigationActive()) return
+      uni.showToast(options)
+    },
     isValidPoint(point) {
       const lat = Number(point?.latitude)
       const lon = Number(point?.longitude)
@@ -556,24 +576,29 @@ export default {
       }
     },
     async fetchNavigationRoute(options = {}) {
+      if (!this.isNavigationActive()) return
+      const requestSeq = this.beginNavigationRequest()
       const payload = this.buildRequestPayload(options)
       if (!payload.waypoints.length) {
-        this.completeNavigation()
+        if (this.isLatestNavigationRequest(requestSeq)) this.completeNavigation()
         return
       }
 
       this.isLoading = true
       try {
-        const result = await post('/routes/navigation', payload, { timeout: 180000 })
+        const result = await post('/routes/navigation', payload, { timeout: 45000 })
+        if (!this.isLatestNavigationRequest(requestSeq)) return
         this.navigationData = result
         this.activeStepIndex = 0
         this.navigationCompleted = false
         if (!options.keepArrived) this.arrivedWaypointKeys = []
         this.deviationCount = 0
       } catch (e) {
+        if (!this.isLatestNavigationRequest(requestSeq)) return
         this.navigationData = this.buildFallbackNavigation(options)
-        uni.showToast({ title: '已使用本地路线兜底', icon: 'none' })
+        this.showNavigationToast({ title: '已使用本地路线兜底', icon: 'none' })
       } finally {
+        if (!this.isLatestNavigationRequest(requestSeq)) return
         this.isLoading = false
         if (!this.isTracking && !this.navigationCompleted) {
           this.startRealtimeTracking()
@@ -625,7 +650,7 @@ export default {
       }
     },
     startRealtimeTracking() {
-      if (this.navigationCompleted) return
+      if (!this.isNavigationActive() || this.navigationCompleted) return
       this.clearTrackingTimers()
       this.isTracking = true
       this.trackingStatus = 'starting'
@@ -641,10 +666,12 @@ export default {
         uni.startLocationUpdate({
           type: 'gcj02',
           success: () => {
+            if (!this.isNavigationActive()) return
             uni.onLocationChange(this.locationChangeHandler)
             this.trackingStatus = 'streaming'
           },
           fail: () => {
+            if (!this.isNavigationActive()) return
             this.startPollingTracking()
           }
         })
@@ -653,33 +680,42 @@ export default {
       this.startPollingTracking()
     },
     startPollingTracking() {
+      if (!this.isNavigationActive()) return
       this.trackingStatus = 'polling'
       this.pullLocationOnce(false)
       this.trackingTimer = setInterval(() => {
+        if (!this.isNavigationActive()) {
+          this.clearTrackingTimers()
+          return
+        }
         this.pullLocationOnce(true)
       }, 4000)
     },
     async pullLocationOnce(allowSimulation = true) {
+      if (!this.isNavigationActive()) return
       try {
         const location = await requestCurrentLocation({
           allowCache: false,
           allowFallback: false,
           highAccuracy: true
         })
+        if (!this.isNavigationActive()) return
         this.handleLocationChange(location)
       } catch (e) {
+        if (!this.isNavigationActive()) return
         if (allowSimulation && !this.simulationTimer) {
           this.startSimulationTracking()
         }
       }
     },
     startSimulationTracking() {
+      if (!this.isNavigationActive()) return
       const points = this.routePolyline.filter(this.isValidPoint)
       if (points.length < 2) return
       this.trackingStatus = 'simulating'
       this.simulationIndex = 0
       this.simulationTimer = setInterval(() => {
-        if (!this.isTracking || this.navigationCompleted) {
+        if (!this.isNavigationActive() || !this.isTracking || this.navigationCompleted) {
           this.clearTrackingTimers()
           return
         }
@@ -728,6 +764,7 @@ export default {
       }
     },
     handleLocationChange(rawLocation) {
+      if (!this.isNavigationActive()) return
       const location = this.normalizeTrackingLocation(rawLocation)
       if (!location || this.navigationCompleted) return
 
@@ -748,7 +785,7 @@ export default {
 
         if (!this.hasReordered) {
           this.hasReordered = true
-          uni.showToast({
+          this.showNavigationToast({
             title: '检测到您不在景区内，正在重新规划路线',
             icon: 'none',
             duration: 3000
@@ -779,6 +816,7 @@ export default {
       }
     },
     evaluateNavigationProgress(location) {
+      if (!this.isNavigationActive()) return
       if (!this.activeStep || !this.currentTargetPoint) return
       const distance = this.calcDistanceM(
         location.latitude,
@@ -800,6 +838,7 @@ export default {
       return Math.max(base, accuracy ? Math.min(60, accuracy * 1.5) : base)
     },
     handleArriveCurrentTarget() {
+      if (!this.isNavigationActive()) return
       const now = Date.now()
       if (now - this.lastAutoAdvanceAt < AUTO_ADVANCE_COOLDOWN_MS) return
       this.lastAutoAdvanceAt = now
@@ -812,14 +851,14 @@ export default {
       if (this.activeStepIndex < this.steps.length - 1) {
         this.activeStepIndex += 1
         this.deviationCount = 0
-        uni.showToast({ title: '宸茶嚜鍔ㄨ繘鍏ヤ笅涓€鎸囧紩', icon: 'none' })
+        this.showNavigationToast({ title: '已自动进入下一指引', icon: 'none' })
         return
       }
       this.completeNavigation()
     },
     /*
     completeNavigation() {
-      if (this.navigationCompleted) return
+      if (!this.isNavigationActive() || this.navigationCompleted) return
       this.navigationCompleted = true
       this.trackingStatus = 'completed'
       this.isTracking = false
@@ -857,8 +896,10 @@ export default {
       this.trackingStatus = 'completed'
       this.isTracking = false
       this.clearTrackingTimers()
-      setTimeout(() => this.maybePromptRouteFeedback(), 800)
-      uni.showToast({ title: 'Arrived', icon: 'success' })
+      setTimeout(() => {
+        if (this.isNavigationActive()) this.maybePromptRouteFeedback()
+      }, 800)
+      this.showNavigationToast({ title: '已到达终点', icon: 'success' })
     },
     getRouteFeedbackKey() {
       const planId = this.navigationPlan?.route_id || this.navigationPlan?.id
@@ -925,11 +966,12 @@ export default {
       }
     },
     async autoReplanAfterDeviation() {
+      if (!this.isNavigationActive()) return
       const now = Date.now()
       if (this.isLoading || now - this.lastAutoReplanAt < AUTO_REPLAN_COOLDOWN_MS) return
       this.lastAutoReplanAt = now
       this.deviationCount = 0
-      uni.showToast({ title: '检测到偏离路线，正在重算指引', icon: 'none' })
+      this.showNavigationToast({ title: '检测到偏离路线，正在重算指引', icon: 'none' })
       await this.fetchNavigationRoute({ 
         remainingOnly: true, 
         keepArrived: true,
@@ -950,7 +992,7 @@ export default {
     },
     openSpotMap(spot) {
       if (!this.isValidPoint(spot)) {
-        uni.showToast({ title: '暂无可导航位置', icon: 'none' })
+        this.showNavigationToast({ title: '暂无可导航位置', icon: 'none' })
         return
       }
       uni.openLocation({

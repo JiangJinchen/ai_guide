@@ -12,6 +12,12 @@ from app.models import AppUserBehavior, RouteHistory, ScenicActivity, Spot, Tick
 SESSION_MEMORY: Dict[str, deque] = defaultdict(lambda: deque(maxlen=6))
 SESSION_MEMORY_TTL = timedelta(minutes=20)
 PENDING_LOOKBACK_TURNS = 2
+STATE_CONTEXT_TASKS = {"spot_guide", "spot_navigation", "contextual_spot", "nearby_service"}
+STATE_RESET_SPOT_TASKS = {"general_chat", "route_planning", "spot_list", "scenic_general_info", "history_query", "ticket_query"}
+TICKET_QUERY_WORDS = ["门票", "票价", "买票", "购票", "观光车票", "多少钱"]
+SPOT_LIST_QUERY_WORDS = ["有哪些景点", "景点有哪些", "景点列表", "有什么景点", "推荐景点"]
+SCENIC_GENERAL_INFO_WORDS = ["景区开放", "景区开放时间", "开放时间", "景区几点开", "几点开放", "营业时间", "交通方式", "怎么到", "怎么坐车"]
+ROUTE_REQUEST_HINTS = ["推荐路线", "游览路线"]
 
 
 CAPABILITIES = [
@@ -237,6 +243,166 @@ def detect_conditions(text: str) -> dict:
     }
 
 
+def empty_conversation_state() -> dict:
+    return {
+        "current_domain": "",
+        "current_task": "",
+        "current_scenic_area": "",
+        "current_spot_id": None,
+        "current_spot_name": "",
+        "pending_action": "",
+        "pending_service_type": "",
+        "updated_at": "",
+    }
+
+
+def normalize_conversation_state(state: Optional[dict]) -> dict:
+    normalized = empty_conversation_state()
+    if isinstance(state, dict):
+        for key in normalized:
+            if key in state:
+                normalized[key] = state.get(key)
+    return normalized
+
+
+def get_conversation_state(memory_key: str) -> dict:
+    for item in reversed(get_memory(memory_key)):
+        state = item.get("conversation_state")
+        if state:
+            return normalize_conversation_state(state)
+    return empty_conversation_state()
+
+
+def state_allows_spot_context(state: Optional[dict]) -> bool:
+    state = normalize_conversation_state(state)
+    return (
+        state.get("current_task") in STATE_CONTEXT_TASKS
+        and bool(state.get("current_spot_id") or state.get("current_spot_name"))
+    )
+
+
+def derive_spot_state(spot: Optional[Spot]) -> dict:
+    if not spot:
+        return {
+            "current_domain": "",
+            "current_scenic_area": "",
+            "current_spot_id": None,
+            "current_spot_name": "",
+        }
+
+    scenic_area = (getattr(spot, "scenic_area_name", None) or "").strip()
+    return {
+        "current_domain": scenic_area,
+        "current_scenic_area": scenic_area,
+        "current_spot_id": getattr(spot, "id", None),
+        "current_spot_name": getattr(spot, "spot_name", "") or "",
+    }
+
+
+def infer_turn_task(text: str, db: Session, states: List[str], conditions: dict) -> str:
+    if is_confirmation_text(text, db):
+        return "confirmation"
+    if contains_any(text, GENERAL_CHAT_PATTERNS):
+        return "general_chat"
+    if is_activity_query(text, db, conditions):
+        return "activity_query"
+    if contains_any(text, TICKET_QUERY_WORDS):
+        return "ticket_query"
+    if contains_any(text, SPOT_LIST_QUERY_WORDS):
+        return "spot_list"
+    if not resolve_spot(text, db) and contains_any(text, SCENIC_GENERAL_INFO_WORDS):
+        return "scenic_general_info"
+    if conditions["history"] or contains_any(text, ["我去过", "导航过", "路线历史"]):
+        return "history_query"
+    if conditions["route"] or conditions["preference"] or contains_any(text, ROUTE_REQUEST_HINTS):
+        return "route_planning"
+
+    requested_service_type = service_type_from_text(text, states)
+    if conditions["nearby"] or any(state in states for state in ["hot", "tired", "hungry"]) or requested_service_type != "service":
+        return "nearby_service"
+
+    spot = resolve_spot(text, db)
+    if spot:
+        wants_navigation = contains_any(text, ["我想去", "想去", "要去", "导航", "带我", "前往", "找", "迷路"]) or normalize_name(text).startswith("去")
+        return "spot_navigation" if wants_navigation else "spot_guide"
+
+    if is_contextual_spot_question(text, db):
+        return "contextual_spot"
+    return "unknown"
+
+
+def derive_turn_state(
+    text: str,
+    db: Session,
+    states: List[str],
+    conditions: dict,
+    previous_state: Optional[dict] = None,
+) -> dict:
+    state = normalize_conversation_state(previous_state)
+    next_state = normalize_conversation_state(state)
+    task = infer_turn_task(text, db, states, conditions)
+    matched_spot = resolve_spot(text, db)
+    matched_spot_state = derive_spot_state(matched_spot)
+    matched_domain = (
+        (resolve_scenic_area_name(text, db) or "").strip()
+        or matched_spot_state.get("current_domain", "")
+    )
+
+    domain_changed = bool(matched_domain and matched_domain != next_state.get("current_domain"))
+    task_changed = bool(task and task != "unknown" and task != next_state.get("current_task"))
+    should_reset_spot = domain_changed or task in STATE_RESET_SPOT_TASKS
+
+    if should_reset_spot:
+        next_state["current_spot_id"] = None
+        next_state["current_spot_name"] = ""
+
+    if task_changed and task != "confirmation":
+        next_state["pending_action"] = ""
+        next_state["pending_service_type"] = ""
+
+    if matched_domain:
+        next_state["current_domain"] = matched_domain
+        next_state["current_scenic_area"] = matched_domain
+
+    if matched_spot:
+        next_state.update(matched_spot_state)
+
+    if task and task != "unknown":
+        next_state["current_task"] = task
+
+    next_state["updated_at"] = datetime.now().isoformat()
+    return next_state
+
+
+def apply_result_to_state(state: Optional[dict], result: OrchestrationResult) -> dict:
+    next_state = normalize_conversation_state(state)
+    context = result.context or {}
+
+    scenic_area_name = (context.get("scenic_area_name") or "").strip()
+    if scenic_area_name:
+        next_state["current_domain"] = scenic_area_name
+        next_state["current_scenic_area"] = scenic_area_name
+
+    if context.get("spot_id") or context.get("spot_name"):
+        if context.get("spot_id"):
+            next_state["current_spot_id"] = context.get("spot_id")
+        if context.get("spot_name"):
+            next_state["current_spot_name"] = context.get("spot_name") or ""
+
+    if context.get("pending"):
+        next_state["pending_action"] = context.get("pending") or ""
+    elif next_state.get("current_task") != "confirmation":
+        next_state["pending_action"] = ""
+
+    if context.get("pending_service_type"):
+        next_state["pending_service_type"] = context.get("pending_service_type") or ""
+    elif next_state.get("current_task") != "nearby_service":
+        next_state["pending_service_type"] = ""
+
+    next_state["updated_at"] = datetime.now().isoformat()
+    return next_state
+
+
 def resolve_spot(text: str, db: Session) -> Optional[Spot]:
     normalized_text = normalize_name(text)
     spots = db.query(Spot).all()
@@ -253,6 +419,84 @@ def resolve_spot(text: str, db: Session) -> Optional[Spot]:
                 best_score = len(normalized)
 
     return best
+
+
+def spot_alias_names(spot_name: str) -> List[str]:
+    names = [spot_name or ""]
+    names.extend(SPOT_ALIASES.get(spot_name or "", []))
+    return [name for name in names if name]
+
+
+def filter_activity_items_for_spot(items: List[dict], spot: Optional[Spot]) -> List[dict]:
+    if not spot:
+        return items
+
+    aliases = [normalize_name(name) for name in spot_alias_names(spot.spot_name or "")]
+    aliases = [alias for alias in aliases if alias]
+    if not aliases:
+        return items
+
+    filtered = []
+    for item in items:
+        haystack = normalize_name(f"{item.get('name', '')}{item.get('location', '')}")
+        if any(alias in haystack for alias in aliases):
+            filtered.append(item)
+    return filtered
+
+
+def resolve_scenic_area_name(text: str, db: Session) -> Optional[str]:
+    normalized_text = normalize_name(text)
+    if not normalized_text:
+        print("[SPOT_LIST] scenic resolver skipped: empty normalized text")
+        return None
+
+    scenic_names = [
+        row[0]
+        for row in db.query(Spot.scenic_area_name).distinct().all()
+        if row and row[0]
+    ]
+    print(
+        "[SPOT_LIST] scenic resolver candidates:",
+        {
+            "text": text,
+            "normalized_text": normalized_text,
+            "scenic_names": scenic_names,
+        },
+    )
+    alias_candidates = []
+    for scenic_name in scenic_names:
+        scenic_name = scenic_name.strip()
+        if not scenic_name:
+            continue
+        aliases = {
+            scenic_name,
+            scenic_name.replace("景区", ""),
+            scenic_name.replace("胜境", ""),
+            scenic_name.replace("禅意小镇", ""),
+            scenic_name.replace("小镇", ""),
+        }
+        normalized_aliases = [normalize_name(alias) for alias in aliases if alias]
+        normalized_aliases = [alias for alias in normalized_aliases if alias]
+        alias_candidates.append((scenic_name, normalized_aliases))
+
+    best_name = None
+    best_score = 0
+    for scenic_name, aliases in alias_candidates:
+        for alias in aliases:
+            if alias and alias in normalized_text and len(alias) > best_score:
+                best_name = scenic_name
+                best_score = len(alias)
+    print(
+        "[SPOT_LIST] scenic resolver result:",
+        {
+            "text": text,
+            "normalized_text": normalized_text,
+            "best_name": best_name,
+            "best_score": best_score,
+            "alias_candidates": alias_candidates,
+        },
+    )
+    return best_name
 
 
 def serialize_spot_location(spot: Spot) -> dict:
@@ -384,6 +628,40 @@ def upcoming_activity_items(db: Session, limit: int = 8) -> List[dict]:
     return upcoming[:limit]
 
 
+ACTIVITY_TOPIC_WORDS = ["表演", "演出", "活动", "节目", "禅修", "体验", "场次"]
+ACTIVITY_QUERY_WORDS = [
+    "几点", "时间", "安排", "场次", "什么时候", "还有", "今天", "现在",
+    "下一场", "下一次", "开始", "结束", "多久", "在哪", "哪里", "位置",
+    "怎么去", "怎么走", "有吗", "有没有", "能看吗", "开放吗",
+]
+ACTIVITY_COMMENT_WORDS = [
+    "震撼", "太棒", "很棒", "真棒", "精彩", "不错", "喜欢", "推荐",
+    "值得", "好看", "惊艳", "感动", "太赞", "绝了", "好美", "太美",
+]
+
+
+def activity_name_mentions(text: str, db: Session) -> bool:
+    for item in activity_items(db):
+        name = (item.get("name") or "").strip()
+        if name and name in text:
+            return True
+    return False
+
+
+def is_activity_query(text: str, db: Session, conditions: dict) -> bool:
+    mentions_topic = contains_any(text, ACTIVITY_TOPIC_WORDS) or activity_name_mentions(text, db)
+    has_query_cue = contains_any(text, ACTIVITY_QUERY_WORDS) or "?" in text or "？" in text
+    has_comment_cue = contains_any(text, ACTIVITY_COMMENT_WORDS)
+
+    if conditions["remaining_today"] or conditions["now"]:
+        return mentions_topic and not has_comment_cue
+
+    if has_comment_cue and not has_query_cue:
+        return False
+
+    return mentions_topic and has_query_cue
+
+
 def infer_pending_service_type_from_history(
     user_id: str,
     db: Optional[Session] = None,
@@ -430,13 +708,31 @@ def infer_pending_service_type_from_history(
     return None
 
 
-def handle_activities(text: str, db: Session, conditions: dict) -> Optional[OrchestrationResult]:
-    if not contains_any(text, ["表演", "演出", "活动", "节目", "禅修", "体验", "几点"]):
+def handle_activities(text: str, db: Session, conditions: dict, conversation_state: Optional[dict] = None) -> Optional[OrchestrationResult]:
+    if not is_activity_query(text, db, conditions):
         return None
+
+    matched_spot = resolve_spot(text, db)
 
     if conditions["remaining_today"] or conditions["now"]:
         items = upcoming_activity_items(db)
+        items = filter_activity_items_for_spot(items, matched_spot)
         if not items:
+            if matched_spot:
+                return OrchestrationResult(
+                    True,
+                    f"今天后面暂时没有查询到{matched_spot.spot_name}相关的未开始演出场次，请以景区现场公告为准。",
+                    context={
+                        "debug_info": {
+                            "decision_path": "orchestrator_activities_upcoming",
+                            "answer_source": "activity_db",
+                            "db_used": True,
+                            "matched_spot": matched_spot.spot_name,
+                            "activity_filter_applied": True,
+                            "result_count": 0,
+                        }
+                    },
+                )
             return OrchestrationResult(True, "今天后面暂时没有查询到未开始的演出场次，请以景区现场公告为准。")
         lines = [f"{item.get('event_time')} {item.get('name')}，地点：{item.get('location') or '以现场为准'}" for item in items]
         reply = "今天接下来还有这些演出：" + "；".join(lines) + "。具体安排以景区现场公告为准。"
@@ -457,15 +753,46 @@ def handle_activities(text: str, db: Session, conditions: dict) -> Optional[Orch
         actions.append(action(
             "查看演出安排",
             "navigate_to",
-            "演",
-            path="/pages/activity-service/index",
-            params={"type": "performance"},
-        ))
-        return OrchestrationResult(True, reply, actions)
+                "演",
+                path="/pages/activity-service/index",
+                params={"type": "performance"},
+            ))
+        return OrchestrationResult(
+            True,
+            reply,
+            actions,
+            context={
+                "debug_info": {
+                    "decision_path": "orchestrator_activities_upcoming",
+                    "answer_source": "activity_db",
+                    "db_used": True,
+                    "matched_spot": matched_spot.spot_name if matched_spot else "",
+                    "activity_filter_applied": bool(matched_spot),
+                    "result_count": len(items),
+                }
+            },
+        )
 
     activity_type = "zen" if contains_any(text, ["禅修", "体验"]) else "performance"
     items = activity_items(db, activity_type)
+    items = filter_activity_items_for_spot(items, matched_spot)
     if not items:
+        if matched_spot:
+            label = "禅修体验" if activity_type == "zen" else "演出"
+            return OrchestrationResult(
+                True,
+                f"目前没有查询到{matched_spot.spot_name}相关的{label}信息，请以景区当日公告为准。",
+                context={
+                    "debug_info": {
+                        "decision_path": "orchestrator_activities",
+                        "answer_source": "activity_db",
+                        "db_used": True,
+                        "matched_spot": matched_spot.spot_name,
+                        "activity_filter_applied": True,
+                        "result_count": 0,
+                    }
+                },
+            )
         return OrchestrationResult(True, "暂时没有查询到相关活动信息，请以景区当日公告为准。")
     lines = []
     for item in items[:5]:
@@ -482,6 +809,16 @@ def handle_activities(text: str, db: Session, conditions: dict) -> Optional[Orch
             path="/pages/activity-service/index",
             params={"type": activity_type},
         )],
+        context={
+            "debug_info": {
+                "decision_path": "orchestrator_activities",
+                "answer_source": "activity_db",
+                "db_used": True,
+                "matched_spot": matched_spot.spot_name if matched_spot else "",
+                "activity_filter_applied": bool(matched_spot),
+                "result_count": len(items[:5]),
+            }
+        },
     )
 
 
@@ -523,25 +860,48 @@ def handle_spot_list(text: str, db: Session) -> Optional[OrchestrationResult]:
     if not contains_any(text, ["有哪些景点", "景点有哪些", "景点列表", "有什么景点", "推荐景点"]):
         return None
 
-    spots = db.query(Spot).all()
+    scenic_area_name = resolve_scenic_area_name(text, db)
+    query = db.query(Spot)
+    if scenic_area_name:
+        query = query.filter(Spot.scenic_area_name == scenic_area_name)
+    spots = query.all()
+    print(
+        "[SPOT_LIST] query result:",
+        {
+            "text": text,
+            "scenic_area_name": scenic_area_name,
+            "spot_count": len(spots),
+            "spot_names": [spot.spot_name for spot in spots[:12] if spot.spot_name],
+        },
+    )
     if not spots:
+        scenic_prefix = f"{scenic_area_name}目前" if scenic_area_name else "当前"
         return OrchestrationResult(
             True,
-            "暂时没有查询到景点列表，请以景区现场信息为准。",
-            context={"debug_info": {"decision_path": "orchestrator_spot_list", "answer_source": "spot_db", "db_used": True}},
+            f"{scenic_prefix}没有查询到景点列表，请以景区现场信息为准。",
+            context={
+                "debug_info": {
+                    "decision_path": "orchestrator_spot_list",
+                    "answer_source": "spot_db",
+                    "db_used": True,
+                    "scenic_area_name": scenic_area_name or "",
+                }
+            },
         )
 
     names = [spot.spot_name for spot in spots if spot.spot_name]
     names = names[:12]
+    scenic_label = scenic_area_name or "当前景区"
     return OrchestrationResult(
         True,
-        "灵山胜境目前可查询到的主要景点有：" + "、".join(names) + "。你可以告诉我想了解哪一个景点。",
+        f"{scenic_label}目前可查询到的主要景点有：" + "、".join(names) + "。你可以告诉我想了解哪一个景点。",
         [action("查看景点介绍", "navigate_to", "介", path="/pages/guide/index")],
         context={
             "debug_info": {
                 "decision_path": "orchestrator_spot_list",
                 "answer_source": "spot_db",
                 "db_used": True,
+                "scenic_area_name": scenic_area_name or "",
                 "spot_count": len(names),
             }
         },
@@ -657,10 +1017,37 @@ def nearby_points_from_spot(db: Session, point_type: Optional[str] = None) -> Li
     return points
 
 
-def resolve_recent_spot(memory_key: str, db: Session) -> Optional[Spot]:
+def resolve_recent_spot(memory_key: str, db: Session, conversation_state: Optional[dict] = None) -> Optional[Spot]:
+    state = normalize_conversation_state(conversation_state or get_conversation_state(memory_key))
+    if state_allows_spot_context(state):
+        spot_id = state.get("current_spot_id")
+        if spot_id:
+            spot = db.query(Spot).filter(Spot.id == spot_id).first()
+            if spot:
+                return spot
+        spot_name = state.get("current_spot_name")
+        if spot_name:
+            spot = resolve_spot(spot_name, db)
+            if spot:
+                return spot
+    elif conversation_state is not None:
+        return None
+
     for offset, item in enumerate(reversed(get_memory(memory_key))):
         if offset >= PENDING_LOOKBACK_TURNS:
             break
+        item_state = normalize_conversation_state(item.get("conversation_state"))
+        if state_allows_spot_context(item_state):
+            spot_id = item_state.get("current_spot_id")
+            if spot_id:
+                spot = db.query(Spot).filter(Spot.id == spot_id).first()
+                if spot:
+                    return spot
+            spot_name = item_state.get("current_spot_name")
+            if spot_name:
+                spot = resolve_spot(spot_name, db)
+                if spot:
+                    return spot
         spot_id = item.get("spot_id")
         if spot_id:
             spot = db.query(Spot).filter(Spot.id == spot_id).first()
@@ -671,32 +1058,27 @@ def resolve_recent_spot(memory_key: str, db: Session) -> Optional[Spot]:
             spot = resolve_spot(spot_name, db)
             if spot:
                 return spot
-    key_parts = (memory_key or "").split(":", 1)
-    if len(key_parts) == 2:
-        user_id, session_id = key_parts
-        rows = (
-            db.query(VisitorInteraction)
-            .filter(VisitorInteraction.visitor_id == user_id)
-            .filter(VisitorInteraction.session_id == session_id)
-            .filter(VisitorInteraction.interaction_type == "chat")
-            .order_by(VisitorInteraction.created_at.desc())
-            .limit(4)
-            .all()
-        )
-        for row in rows:
-            combined = f"{row.content or ''} {row.reply_text or ''}"
-            spot = resolve_spot(combined, db)
-            if spot:
-                return spot
     return None
 
 
 CONTEXTUAL_SPOT_PRONOUNS = ["它", "这个", "这个景点", "该景点", "这里", "那边", "刚才", "上面", "之前说的"]
 EXPLICIT_SCENIC_SCOPE_WORDS = ["景区", "灵山胜境", "整个景区", "全园", "园区"]
+GENERAL_CHAT_PATTERNS = [
+    "你是谁",
+    "你叫什么",
+    "你叫啥",
+    "你是哪个",
+    "介绍一下你自己",
+    "介绍下你自己",
+    "自我介绍",
+    "你的名字",
+]
 
 
 def is_contextual_spot_question(text: str, db: Session) -> bool:
     if resolve_spot(text, db):
+        return False
+    if contains_any(text, GENERAL_CHAT_PATTERNS):
         return False
     if contains_any(text, EXPLICIT_SCENIC_SCOPE_WORDS):
         return False
@@ -714,11 +1096,29 @@ def is_contextual_spot_question(text: str, db: Session) -> bool:
     return contains_any(text, CONTEXTUAL_SPOT_PRONOUNS) or contains_any(text, spot_info_words)
 
 
-def handle_contextual_spot_question(text: str, db: Session, memory_key: str) -> Optional[OrchestrationResult]:
+def handle_general_chat(text: str) -> Optional[OrchestrationResult]:
+    if not contains_any(text, GENERAL_CHAT_PATTERNS):
+        return None
+
+    return OrchestrationResult(
+        True,
+        "我是灵山胜境数字导游，可以陪您查询景点介绍、演出安排、路线规划、门票和附近服务信息。",
+        context={
+            "debug_info": {
+                "decision_path": "orchestrator_general_chat",
+                "answer_source": "rule",
+                "db_used": False,
+                "matched_intent": "self_intro",
+            }
+        },
+    )
+
+
+def handle_contextual_spot_question(text: str, db: Session, memory_key: str, conversation_state: Optional[dict] = None) -> Optional[OrchestrationResult]:
     if not is_contextual_spot_question(text, db):
         return None
 
-    spot = resolve_recent_spot(memory_key, db)
+    spot = resolve_recent_spot(memory_key, db, conversation_state)
     if not spot:
         return None
 
@@ -868,6 +1268,7 @@ def handle_nearby(
     user_id: str,
     session_id: Optional[str],
     memory_key: str,
+    conversation_state: Optional[dict] = None,
 ) -> Optional[OrchestrationResult]:
     requested_service_type = service_type_from_text(text, states)
     pending_service_type = (
@@ -881,7 +1282,7 @@ def handle_nearby(
     if not conditions["nearby"] and not any(state in states for state in ["hot", "tired", "hungry"]) and not is_facility_query:
         return None
 
-    anchor_spot = resolve_spot(text, db) or resolve_recent_spot(memory_key, db)
+    anchor_spot = resolve_spot(text, db) or resolve_recent_spot(memory_key, db, conversation_state)
     if anchor_spot:
         if service_type != "service":
             from app.api.visitor import find_facilities_near_spot
@@ -1149,30 +1550,40 @@ async def orchestrate_chat(
     text = (text or "").strip()
     states = detect_user_states(text)
     conditions = detect_conditions(text)
+    previous_state = get_conversation_state(memory_key)
+    conversation_state = derive_turn_state(text, db, states, conditions, previous_state)
 
     handlers = [
         lambda: resolve_confirmation(text, memory_key, db),
-        lambda: handle_activities(text, db, conditions),
+        lambda: handle_general_chat(text),
+        lambda: handle_activities(text, db, conditions, conversation_state),
         lambda: handle_tickets(text, db),
         lambda: handle_spot_list(text, db),
-        lambda: handle_contextual_spot_question(text, db, memory_key),
+        lambda: handle_contextual_spot_question(text, db, memory_key, conversation_state),
         lambda: handle_scenic_general_info(text, db),
         lambda: handle_history(text, user_id, db, conditions),
         lambda: handle_route_request(text, conditions),
-        lambda: handle_nearby(text, db, states, conditions, user_location, user_id, session_id, memory_key),
+        lambda: handle_nearby(text, db, states, conditions, user_location, user_id, session_id, memory_key, conversation_state),
         lambda: handle_spot_navigation_or_guide(text, db, states),
     ]
 
     for handler in handlers:
         result = handler()
         if result and result.handled:
+            next_state = apply_result_to_state(conversation_state, result)
             remember(memory_key, {
                 "text": text,
                 "states": states,
                 "conditions": conditions,
+                "conversation_state": next_state,
                 **result.context,
             })
             return result
 
-    remember(memory_key, {"text": text, "states": states, "conditions": conditions})
-    return OrchestrationResult(False, context={"states": states, "conditions": conditions})
+    remember(memory_key, {
+        "text": text,
+        "states": states,
+        "conditions": conditions,
+        "conversation_state": conversation_state,
+    })
+    return OrchestrationResult(False, context={"states": states, "conditions": conditions, "conversation_state": conversation_state})

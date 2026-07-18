@@ -5,7 +5,6 @@
         <view class="map-road road-main"></view>
         <view class="map-road road-side"></view>
         <view class="map-water"></view>
-        <view class="path-line" v-for="line in pathLines" :key="line.key" :style="line.style"></view>
         <view class="user-dot" v-if="userLocation" :style="userStyle">
           <view class="pulse"></view>
           <text>我</text>
@@ -231,20 +230,6 @@ export default {
         .slice(0, 12)
         .map(item => ({ ...item, style: this.pointStyle(item) }))
     },
-    pathLines() {
-      const points = this.routeSpots.map(item => this.pointPosition(item))
-      return points.slice(0, -1).map((point, index) => {
-        const next = points[index + 1]
-        const dx = next.x - point.x
-        const dy = next.y - point.y
-        const length = Math.sqrt(dx * dx + dy * dy)
-        const angle = Math.atan2(dy, dx) * 180 / Math.PI
-        return {
-          key: `${index}-${index + 1}`,
-          style: `left:${point.x}%;top:${point.y}%;width:${length}%;transform:rotate(${angle}deg);`
-        }
-      })
-    }
   },
   async onLoad(options = {}) {
     const shareId = options.share_id || options.shareId
@@ -1022,6 +1007,7 @@ export default {
   position: relative;
   height: 100%;
   overflow: hidden;
+  isolation: isolate;
   background:
     radial-gradient(circle at 50% 28%, rgba(231, 190, 104, 0.32), transparent 22%),
     linear-gradient(180deg, #1f3f3d 0%, #583025 55%, #201611 100%);
@@ -1056,15 +1042,6 @@ export default {
   height: 130rpx;
   border-radius: 50%;
   background: rgba(255, 248, 232, 0.12);
-}
-
-.path-line {
-  position: absolute;
-  z-index: 2;
-  height: 8rpx;
-  transform-origin: left center;
-  border-radius: 999rpx;
-  background: linear-gradient(90deg, #f2ca70, #fff8e8);
 }
 
 .user-dot,
@@ -1105,13 +1082,14 @@ export default {
   color: #8c3228;
   font-size: 23rpx;
   font-weight: 850;
-  box-shadow: 0 8rpx 20rpx rgba(55, 37, 26, 0.2);
+  box-shadow: 0 8rpx 20rpx rgba(55, 37, 26, 0.2), 0 0 0 2rpx rgba(255, 248, 232, 0.28);
 }
 
 .idle-spot {
-  width: 24rpx;
-  height: 24rpx;
-  background: rgba(255, 248, 232, 0.4);
+  width: 22rpx;
+  height: 22rpx;
+  background: rgba(255, 248, 232, 0.34);
+  box-shadow: 0 0 0 2rpx rgba(255, 248, 232, 0.14);
 }
 
 .stats-bar {

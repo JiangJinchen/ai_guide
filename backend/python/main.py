@@ -70,6 +70,26 @@ if token_secret_is_default():
     logger.warning("ADMIN_TOKEN_SECRET is not configured; using a development-only signing secret")
 
 
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    started_at = time.perf_counter()
+    logger.info("HTTP request started: %s %s", request.method, request.url.path)
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("HTTP request failed: %s %s", request.method, request.url.path)
+        raise
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    logger.info(
+        "HTTP request completed: %s %s -> %s in %.1fms",
+        request.method,
+        request.url.path,
+        response.status_code,
+        elapsed_ms,
+    )
+    return response
+
+
 def _decode_request_body(raw_body: bytes):
     if not raw_body:
         return None

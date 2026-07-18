@@ -266,6 +266,9 @@ export default {
   },
   onShow() {
     this.isPageActive = true
+    this.$nextTick(() => {
+      if (this.$refs.digitalHuman) this.$refs.digitalHuman.ensureLive2D()
+    })
     if (this.spotId && !this.behaviorId && this.spotDetail) {
       this.recordViewBehavior()
     }
@@ -273,11 +276,19 @@ export default {
   },
   onHide() {
     this.isPageActive = false
+    if (this.$refs.digitalHuman) {
+      this.$refs.digitalHuman.destroyLive2D({ releaseAudioGraph: false })
+      this.digitalReady = false
+    }
     this.clearGuideFeedbackTimer()
     this.dismissFeedbackModal()
   },
   onUnload() {
     this.isPageActive = false
+    if (this.$refs.digitalHuman) {
+      this.$refs.digitalHuman.destroyLive2D({ releaseAudioGraph: false })
+      this.digitalReady = false
+    }
     this.clearGuideFeedbackTimer()
     this.dismissFeedbackModal()
     if (this.spotId && this.spotDetail) {

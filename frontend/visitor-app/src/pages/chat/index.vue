@@ -8,7 +8,9 @@
         <text class="page-subtitle">{{ statusText }}</text>
       </view>
       <view class="top-actions">
-        <button class="history-button" @click="openHistory">史</button>
+        <button class="history-button" @click="openHistory">
+          <svg t="1784360750105" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="5336" width="200" height="200"><path d="M516.693333 19.2a495.36 495.36 0 1 0 495.36 495.36A495.786667 495.786667 0 0 0 516.693333 19.2z m0 926.72a431.36 431.36 0 1 1 431.36-431.36 431.786667 431.786667 0 0 1-431.36 431.786667z" fill="#ffffff" p-id="5337"></path><path d="M548.693333 501.333333V227.84a32 32 0 0 0-64 0v287.146667a31.573333 31.573333 0 0 0 9.813334 22.613333l235.946666 227.413333a32 32 0 1 0 42.666667-46.08z" fill="#ffffff" p-id="5338"></path></svg>
+        </button>
       </view>
     </view>
 
@@ -284,7 +286,10 @@ export default {
   },
   onHide() {
     this.isPageActive = false
-    if (this.$refs.digitalHuman) this.$refs.digitalHuman.pauseRendering()
+    if (this.$refs.digitalHuman) {
+      this.$refs.digitalHuman.destroyLive2D({ releaseAudioGraph: false })
+      this.digitalReady = false
+    }
     this.showFeedbackModal = false
     this.closeSseConnection()
     this.stopCurrentSpeech()
@@ -296,6 +301,10 @@ export default {
     this.stopCurrentSpeech(false)
     this.showFeedbackModal = false
     this.closeSseConnection()
+    if (this.$refs.digitalHuman) {
+      this.$refs.digitalHuman.destroyLive2D({ releaseAudioGraph: false })
+      this.digitalReady = false
+    }
   },
   methods: {
     async loadDigitalHumanConfig() {

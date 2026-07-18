@@ -49,6 +49,8 @@ class RAGRequest(BaseModel):
 # 配置
 # ======================
 AI_API_KEY = os.getenv("AI_API_KEY", "")
+AI_API_URL = os.getenv("AI_API_URL", "https://apihub.agnes-ai.com/v1/chat/completions")
+AI_MODEL = os.getenv("AI_MODEL", "agnes-2.0-flash")
 
 ASR_APP_ID = os.getenv("ASR_APP_ID", "")
 ASR_API_KEY = os.getenv("ASR_API_KEY", "")
@@ -58,8 +60,8 @@ TTS_APP_ID = os.getenv("TTS_APP_ID", "")
 TTS_API_KEY = os.getenv("TTS_API_KEY", "")
 TTS_API_SECRET = os.getenv("TTS_API_SECRET", "")
 
-QWEN_API_URL = "https://apihub.agnes-ai.com/v1/chat/completions"
-QWEN_MODEL = "agnes-2.0-flash"
+QWEN_API_URL = AI_API_URL
+QWEN_MODEL = AI_MODEL
 AGNES_STREAM_CONNECT_TIMEOUT = max(0.5, float(os.getenv("AGNES_STREAM_CONNECT_TIMEOUT", "1.5")))
 AGNES_STREAM_READ_TIMEOUT = max(3.0, float(os.getenv("AGNES_STREAM_READ_TIMEOUT", "8.0")))
 AGNES_CIRCUIT_FAILURE_THRESHOLD = max(1, int(os.getenv("AGNES_CIRCUIT_FAILURE_THRESHOLD", "2")))
@@ -67,6 +69,14 @@ AGNES_CIRCUIT_OPEN_SECONDS = max(10, int(os.getenv("AGNES_CIRCUIT_OPEN_SECONDS",
 
 _AGNES_FAILURE_COUNT = 0
 _AGNES_BLOCKED_UNTIL = 0.0
+
+
+def mask_secret(value: str, keep: int = 4) -> str:
+    if not value:
+        return "<empty>"
+    if len(value) <= keep * 2:
+        return "*" * len(value)
+    return f"{value[:keep]}...{value[-keep:]}"
 
 
 def agnes_circuit_is_open() -> bool:
@@ -262,6 +272,7 @@ async def qwen_inference(text: str, user_id: str, knowledge: str = "", rag_resul
         "Authorization": f"Bearer {AI_API_KEY}",
         "Content-Type": "application/json"
     }
+    print(f"[AI] Inference target: url={QWEN_API_URL}, model={QWEN_MODEL}, key={mask_secret(AI_API_KEY)}")
 
     emotion_prompt = f""
     if emotion and emotion != "neutral":
@@ -301,7 +312,7 @@ async def qwen_inference(text: str, user_id: str, knowledge: str = "", rag_resul
         "max_tokens": 512
     }
 
-    print(f"[AI] 开始调用Agnes AI: {text[:50]}...")
+    print(f"[AI] 开始调用AI: {text[:50]}...")
     print(f"[AI] API URL: {QWEN_API_URL}")
     print(f"[AI] Knowledge: {knowledge[:100]}...")
 
@@ -320,11 +331,11 @@ async def qwen_inference(text: str, user_id: str, knowledge: str = "", rag_resul
                     pool=AGNES_STREAM_CONNECT_TIMEOUT,
                 ),
             )
-            print(f"[AI] Agnes AI状态码: {response.status_code}")
+            print(f"[AI] AI状态码: {response.status_code}")
             response.raise_for_status()
             record_agnes_success()
             result = response.json()
-            print(f"[AI] Agnes AI返回: {json.dumps(result)[:200]}...")
+            print(f"[AI] AI返回: {json.dumps(result)[:200]}...")
             content = result["choices"][0]["message"]["content"]
             
             intent = parse_service_intent(content)
@@ -342,17 +353,17 @@ async def qwen_inference(text: str, user_id: str, knowledge: str = "", rag_resul
                 }
             }
         except httpx.TimeoutException:
-            print(f"[AI] Agnes AI超时(第{attempt+1}/{max_retries}次)")
+            print(f"[AI] AI超时(第{attempt+1}/{max_retries}次)")
         except httpx.HTTPStatusError as e:
-            print(f"[AI] Agnes AI HTTP错误: {str(e)}")
+            print(f"[AI] AI HTTP错误: {str(e)}")
             if response.status_code in [500, 502, 503, 504]:
                 record_agnes_failure(f"HTTP {response.status_code}")
             break
         except Exception as e:
-            print(f"[AI] Agnes AI调用失败: {str(e)}")
+            print(f"[AI] AI调用失败: {str(e)}")
             break
 
-    print(f"[AI] Agnes AI调用失败，使用知识库降级方案")
+    print(f"[AI] AI调用失败，使用知识库降级方案")
     fallback_result = await knowledge_fallback_inference(text, rag_results)
     return {
         **fallback_result,
@@ -676,10 +687,6 @@ async def xunfei_asr(audio_base64: str, format: str = "pcm"):
 async def text_to_speech(request: TTSRequest):
     try:
         speech_text = clean_tts_text(request.text)
-        print(
-            f"[TTS] reply_id={request.reply_id or '-'} "
-            f"input_len={len(request.text or '')}, speech_len={len(speech_text)}, text={speech_text[:80]}"
-        )
         if not speech_text:
             return await local_fallback_tts(request.text)
 
@@ -847,7 +854,7 @@ async def qwen_stream_inference(text: str, user_id: str, knowledge: str = "", ra
 
     max_retries = 0 if agnes_circuit_is_open() else 1
     if max_retries == 0:
-        print("[AI] Agnes circuit is open; skipping remote stream call")
+        print("[AI] circuit is open; skipping remote stream call")
     stream_timeout = httpx.Timeout(
         connect=AGNES_STREAM_CONNECT_TIMEOUT,
         read=AGNES_STREAM_READ_TIMEOUT,
@@ -867,7 +874,7 @@ async def qwen_stream_inference(text: str, user_id: str, knowledge: str = "", ra
                 json=payload,
                 timeout=stream_timeout,
             ) as response:
-                print(f"[AI] Agnes AI流式状态码: {response.status_code}")
+                print(f"[AI] AI流式状态码: {response.status_code}")
                 response.raise_for_status()
 
                 full_content = ""
@@ -928,7 +935,7 @@ async def qwen_stream_inference(text: str, user_id: str, knowledge: str = "", ra
                                     if not first_token_logged:
                                         first_token_logged = True
                                         print(
-                                            f"[AI] Agnes first-token latency: "
+                                            f"[AI] first-token latency: "
                                             f"{time.perf_counter() - request_started_at:.2f}s"
                                         )
                                     full_content += content
@@ -961,23 +968,23 @@ async def qwen_stream_inference(text: str, user_id: str, knowledge: str = "", ra
                     yield f"__STREAM_META__{json.dumps(meta_data)}__STREAM_META__"
                     return
 
-            print(f"[AI] Agnes AI流式调用失败，尝试降级方案")
+            print(f"[AI] AI流式调用失败，尝试降级方案")
         except httpx.TimeoutException:
-            print(f"[AI] Agnes AI流式超时(第{attempt+1}/{max_retries}次)")
+            print(f"[AI] AI流式超时(第{attempt+1}/{max_retries}次)")
             record_agnes_failure("stream timeout")
             if partial_content:
                 yield f"__STREAM_META__{json.dumps({'intent': {'service': None, 'params': {}}, 'debug': {'source': 'qwen_partial_timeout'}})}__STREAM_META__"
                 return
         except httpx.HTTPStatusError as e:
-            print(f"[AI] Agnes AI流式HTTP错误: {str(e)}")
+            print(f"[AI] AI流式HTTP错误: {str(e)}")
             if e.response.status_code in [500, 502, 503, 504]:
                 record_agnes_failure(f"HTTP {e.response.status_code}")
             break
         except Exception as e:
-            print(f"[AI] Agnes AI流式调用失败: {str(e)}")
+            print(f"[AI] AI流式调用失败: {str(e)}")
             break
 
-    print(f"[AI] Agnes AI流式调用失败，使用降级方案")
+    print(f"[AI] AI流式调用失败，使用降级方案")
     fallback_result = await knowledge_fallback_inference(text, rag_results)
     yield fallback_result["text"]
     meta_data = {

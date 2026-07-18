@@ -40,6 +40,20 @@ const formatToastMessage = (detail, fallback = '璇锋眰澶辫触') => {
   return fallback
 }
 
+const normalizePayload = (payload) => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return payload
+  }
+  const normalized = { ...payload }
+  if (normalized.user_id !== undefined && normalized.user_id !== null) {
+    normalized.user_id = String(normalized.user_id)
+  }
+  if (normalized.session_id !== undefined && normalized.session_id !== null) {
+    normalized.session_id = String(normalized.session_id)
+  }
+  return normalized
+}
+
 const request = (options) => {
   return new Promise((resolve, reject) => {
     const rawUserId = uni.getStorageSync('userId')
@@ -60,7 +74,7 @@ const request = (options) => {
     uni.request({
       url: fullUrl,
       method: options.method || 'GET',
-      data: options.data || {},
+      data: normalizePayload(options.data || {}),
       header: headers,
       timeout: options.timeout || 60000,
       success: (res) => {
