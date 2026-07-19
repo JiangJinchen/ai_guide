@@ -202,9 +202,10 @@ export default {
   },
   methods: {
     isAppRenderMode() {
-      return process.env.UNI_PLATFORM === 'app-plus'
+      return process.env.UNI_PLATFORM === 'app-plus' || typeof plus !== 'undefined'
     },
     sendRenderAction(type, payload = {}) {
+      console.log('[digital-human] send render action', { type, payload, isReady: this.isReady, loadError: this.loadError, renderErrorCount: this.renderErrorCount })
       this.renderAction = {
         seq: ++this.renderActionSeq,
         type,
@@ -215,23 +216,28 @@ export default {
       this.renderErrorCount = 0
       this.loadError = ''
       this.isReady = true
-      console.log('[digital-human] app renderjs ready')
+      console.log('[digital-human] app renderjs ready', { isReady: this.isReady, loadError: this.loadError, renderErrorCount: this.renderErrorCount })
       this.$emit('ready')
     },
     onRenderError(error) {
       const message = error && (error.message || error.errMsg || error.error) ? (error.message || error.errMsg || error.error) : '加载失败'
-      console.error('[digital-human] app renderjs error', error)
+      console.warn('[digital-human] app renderjs error', { message, isReady: this.isReady, renderErrorCount: this.renderErrorCount, error })
       if (this.isAppRenderMode()) {
-        if (this.isReady) return
+        if (this.isReady) {
+          console.warn('[digital-human] ignore renderjs error after ready', { message, renderErrorCount: this.renderErrorCount })
+          return
+        }
         this.renderErrorCount += 1
         const transient = /document unavailable|stage unavailable|querySelector|appendChild|Cannot read property/i.test(message)
         if (transient && this.renderErrorCount <= 30) {
+          console.warn('[digital-human] retry transient renderjs error', { message, renderErrorCount: this.renderErrorCount })
           this.loadError = ''
           const delay = Math.min(1200, 200 + this.renderErrorCount * 100)
           setTimeout(() => this.sendRenderAction('reload'), delay)
           return
         }
         if (this.renderErrorCount <= 5) {
+          console.warn('[digital-human] retry non-transient renderjs error', { message, renderErrorCount: this.renderErrorCount })
           this.loadError = ''
           setTimeout(() => this.sendRenderAction('reload'), 500)
           return
@@ -377,6 +383,7 @@ export default {
       }
     },
     async ensureLive2D() {
+      console.log('[digital-human] ensureLive2D', { isAppRenderMode: this.isAppRenderMode(), isReady: this.isReady, loadError: this.loadError })
       if (this.isAppRenderMode()) {
         this.sendRenderAction('ensure')
         return
@@ -391,6 +398,7 @@ export default {
       if (this.app && typeof this.app.start === 'function') this.app.start()
     },
     pauseRendering() {
+      console.log('[digital-human] pauseRendering', { isAppRenderMode: this.isAppRenderMode(), isReady: this.isReady, loadError: this.loadError })
       if (this.isAppRenderMode()) {
         this.sendRenderAction('pause')
         return
@@ -666,6 +674,7 @@ export default {
       }
     },
     destroyLive2D(options = {}) {
+      console.log('[digital-human] destroyLive2D', { isAppRenderMode: this.isAppRenderMode(), isReady: this.isReady, loadError: this.loadError, options })
       if (this.isAppRenderMode()) {
         this.isReady = false
         this.sendRenderAction('destroy')
@@ -927,6 +936,7 @@ export default {
     },
     applyState(state = {}) {
       if (!this.model) return
+      if (this.app && this.app.start) this.app.start()
       this.setExpression(EMOTION_MAP[state.emotion] || 'Normal')
       const motionOptions = this.resolveStatusMotion(state.status)
       this.playMotion(motionOptions.motion, motionOptions.motionIndex, { force: motionOptions.force })
@@ -953,7 +963,7 @@ export default {
       if (action.type === 'stopSpeaking') return this.stopSpeaking()
       if (action.type === 'applyDigitalHuman') this.applyDigitalHuman(payload)
     },
-    async reload() { this.destroyLive2D(); await this.initLive2D(this.lastState || {}) },
+    async reload() { console.log('[digital-human][renderjs] reload', { initialized: this.initialized, initializing: this.initializing, has_model: !!this.model, initGeneration: this.initGeneration }); this.destroyLive2D(); await this.initLive2D(this.lastState || {}) },
     resolveStatusMotion(status) { return STATUS_MOTION_OPTIONS[status] || STATUS_MOTION_OPTIONS.idle },
     getMotionPriority(force = false) {
       const priority = window.PIXI && window.PIXI.live2d && window.PIXI.live2d.MotionPriority
@@ -1019,6 +1029,7 @@ export default {
     stopLipSync() { this.isSpeakingNow = false; if (this.lipSyncTimer) clearInterval(this.lipSyncTimer); this.lipSyncTimer = null; this.mouthOpenValue = 0 },
     startSpeaking(options = {}) {
       if (!this.model) return
+      if (this.app && this.app.start) this.app.start()
       this.setExpression(options.expression || EMOTION_MAP[(this.lastState || {}).emotion] || 'Normal')
       const speakMotion = this.resolveStatusMotion('speak')
       this.playMotion(options.motion || speakMotion.motion, options.motionIndex ?? speakMotion.motionIndex, { force: true })
@@ -1034,6 +1045,7 @@ export default {
       if (options.speaking !== undefined) options.speaking ? this.startLipSync() : this.stopLipSync()
     },
     destroyLive2D() {
+      console.log('[digital-human][renderjs] destroyLive2D', { initialized: this.initialized, initializing: this.initializing, hasModel: !!this.model, initGeneration: this.initGeneration, lastActionSeq: this.lastActionSeq })
       this.stopLipSync()
       this.unbindMouthUpdate()
       this.unbindLive2DTicker()

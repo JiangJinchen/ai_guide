@@ -758,9 +758,14 @@ async def xunfei_tts(text: str, voice: str = "female"):
                 res = json.loads(await websocket.recv())
                 if res.get("code") != 0:
                     raise Exception(f"讯飞TTS返回错误 code={res.get('code')}, message={res.get('message')}")
-                if "audio" in res.get("data", {}):
-                    audio_data += base64.b64decode(res["data"]["audio"])
-                if res.get("data", {}).get("status") == 2:
+                data = res.get("data", {}) or {}
+                audio = data.get("audio")
+                if audio:
+                    try:
+                        audio_data += base64.b64decode(audio)
+                    except Exception as decode_error:
+                        raise Exception(f'讯飞TTS音频解码失败: {decode_error}')
+                if data.get("status") == 2:
                     break
 
         if not audio_data:

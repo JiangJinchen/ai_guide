@@ -372,12 +372,14 @@ export default {
     },
     onDigitalReady() {
       this.digitalReady = true
+      console.log('[chat] digital human ready', { digitalReady: this.digitalReady })
     },
     onDigitalError(error) {
       const message = error && error.message ? error.message : '数字人模型加载失败'
       const transient = /document unavailable|stage unavailable|querySelector|appendChild|Cannot read property/i.test(message)
+      console.warn('[chat] digital human error received', { message, transient, digitalReady: this.digitalReady })
       if (transient || this.digitalReady) {
-        console.warn('[chat] ignore transient digital human error', { message })
+        console.warn('[chat] ignore digital human error', { message, transient, digitalReady: this.digitalReady })
         return
       }
       this.digitalReady = false
@@ -689,6 +691,7 @@ export default {
     },
     async navigateToService(action) {
       const actionType = action.action_type || 'navigate_to'
+      console.log('[chat] service action click', { action, action_type: actionType })
 
       if (actionType === 'open_location') {
         const payload = action.payload || {}
@@ -718,18 +721,34 @@ export default {
         return
       }
 
-      if (!action.path) return
+      if (!action.path) {
+        console.warn('[chat] service action missing path', { action, action_type: actionType })
+        return
+      }
       let url = action.path
       if (action.params && Object.keys(action.params).length > 0) {
-        const params = new URLSearchParams(action.params).toString()
-        url = `${url}?${params}`
+        const params = Object.keys(action.params)
+          .filter(key => action.params[key] !== undefined && action.params[key] !== null)
+          .map(key => encodeURIComponent(key) + '=' + encodeURIComponent(String(action.params[key])))
+          .join('&')
+        if (params) url = url + '?' + params
       }
 
       if (actionType === 'switch_tab') {
-        uni.switchTab({ url: action.path })
+        console.log('[chat] service action switchTab', { url: action.path, action })
+        uni.switchTab({
+          url: action.path,
+          success: () => console.log('[chat] service action switchTab success', { url: action.path }),
+          fail: (error) => console.warn('[chat] service action switchTab failed', { url: action.path, error })
+        })
         return
       }
-      uni.navigateTo({ url })
+      console.log('[chat] service action navigateTo', { url, action })
+      uni.navigateTo({
+        url,
+        success: () => console.log('[chat] service action navigateTo success', { url }),
+        fail: (error) => console.warn('[chat] service action navigateTo failed', { url, error })
+      })
     },
     toggleEmojiPanel() {
       this.showEmojiPanel = !this.showEmojiPanel
