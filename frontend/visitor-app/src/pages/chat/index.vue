@@ -292,13 +292,22 @@ export default {
     }
   },
   onHide() {
+    const keepPendingReply = this.status === 'think'
+    console.log('[chat] onHide', {
+      status: this.status,
+      keepPendingReply,
+      activeReplySeq: this.activeReplySeq,
+      hasSseClient: !!this.currentSseClient
+    })
     this.isPageActive = false
-    this.activeReplySeq += 1
+    if (!keepPendingReply) {
+      this.activeReplySeq += 1
+      this.closeSseConnection()
+      this.stopCurrentSpeech()
+      this.status = 'idle'
+      this.speechPlaybackActive = false
+    }
     this.showFeedbackModal = false
-    this.closeSseConnection()
-    this.stopCurrentSpeech()
-    this.status = 'idle'
-    this.speechPlaybackActive = false
     if (this.$refs.digitalHuman) {
       this.$refs.digitalHuman.stopSpeaking()
       this.$refs.digitalHuman.pauseRendering()
@@ -787,8 +796,13 @@ export default {
       }
     },
     getCurrentLocationForChat(text) {
-      if (!this.shouldAttachLocation(text)) return Promise.resolve({})
+      if (!this.shouldAttachLocation(text)) {
+        console.log('[chat] getCurrentLocationForChat skip', { text })
+        return Promise.resolve({})
+      }
+      console.log('[chat] getCurrentLocationForChat start', { text })
       return this.resolveCurrentLocation(false).then((location) => {
+        console.log('[chat] getCurrentLocationForChat resolved', { text, hasLocation: !!location, location })
         if (!location) return {}
         this.notifyLocationFeedback(location)
         return {
@@ -798,6 +812,12 @@ export default {
       })
     },
     async askQuestion(text, options = {}) {
+      console.log('[chat] askQuestion start', {
+        text,
+        options,
+        status: this.status,
+        digitalReady: this.digitalReady,
+      })
       const replySeq = this.activeReplySeq + 1
       this.activeReplySeq = replySeq
       this.stopCurrentSpeech()
@@ -807,14 +827,18 @@ export default {
       this.messages.push({ role: 'user', text: options.displayText || text })
       this.scrollToBottom()
       this.status = 'think'
+      console.log('[chat] askQuestion status set', { text, status: this.status, activeReplySeq: this.activeReplySeq })
       this.emotion = 'neutral'
 
       try {
+        console.log('[chat] askQuestion location payload', { text, options, status: this.status })
         const locationPayload = options.location ? {
           latitude: options.location.latitude,
           longitude: options.location.longitude
         } : await this.getCurrentLocationForChat(text)
+        console.log('[chat] askQuestion location resolved', { text, locationPayload, status: this.status })
         this.touchChatSession()
+        console.log('[chat] askQuestion after touchChatSession', { text, status: this.status, sessionId })
 
         const assistantMsgIndex = this.messages.length
         this.messages.push({ role: 'assistant', text: '', service_actions: [], debug_info: {} })
@@ -829,6 +853,12 @@ export default {
         let streamFailed = false
 
         const onMessage = (data) => {
+          console.log('[chat] sse message received', {
+            type: data && data.type,
+            reply_id: data && data.reply_id,
+            text_length: data && data.text ? String(data.text).length : 0,
+            has_service_actions: !!(data && data.service_actions && data.service_actions.length),
+          })
           if (replySeq !== this.activeReplySeq) return
 
           if (data.type === 'content') {
@@ -878,6 +908,7 @@ export default {
         }
 
         const onError = (error) => {
+          console.error('[chat] stream error callback', { replySeq, activeReplySeq: this.activeReplySeq, error })
           if (replySeq !== this.activeReplySeq) return
           if (streamFailed) return
           streamFailed = true
@@ -888,6 +919,7 @@ export default {
         }
 
         const onClose = async () => {
+          console.log('[chat] stream close callback', { replySeq, activeReplySeq: this.activeReplySeq, speechTextLength: speechText.length, leadSpeechTextLength: leadSpeechText.length, status: this.status })
           if (replySeq !== this.activeReplySeq) return
           if (speechStartPromise) {
             await speechStartPromise
@@ -912,8 +944,21 @@ export default {
           this.maybePromptChatFeedback(sessionId)
         }
 
+        console.log('[chat] askQuestion before streamChat', {
+          text,
+          locationPayload,
+          userId,
+          sessionId,
+        })
+        console.log('[chat] askQuestion streamChat request sending', { text, locationPayload, userId, sessionId, status: this.status })
         this.currentSseClient = await streamChat({ text, user_id: userId, session_id: sessionId, ...locationPayload }, onMessage, onError, onClose)
+        console.log('[chat] askQuestion streamChat attached', {
+          text,
+          locationPayload,
+          status: this.status,
+        })
       } catch (e) {
+        console.error('[chat] askQuestion failed', { text, error: e && e.message ? e.message : e, stack: e && e.stack ? e.stack : '' })
         if (replySeq !== this.activeReplySeq) return
         this.messages.push({ role: 'assistant', text: '当前网络不稳定，您可以稍后再问我。' })
         this.status = 'idle'

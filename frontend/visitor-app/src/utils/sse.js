@@ -61,6 +61,13 @@ export class SSEClient {
 
   async send(data) {
     const payload = normalizePayload(data)
+    console.log('[sse] send start', {
+      url: this.url,
+      payloadKeys: payload && typeof payload === 'object' ? Object.keys(payload) : [],
+      text: payload && payload.text,
+      latitude: payload && payload.latitude,
+      longitude: payload && payload.longitude
+    })
     const XHR = this.getXHRConstructor()
     if (!XHR) {
       return this._sendWithUniRequest(payload)
@@ -80,7 +87,23 @@ export class SSEClient {
       this.xhr.setRequestHeader('X-User-Id', this.userId)
       this.xhr.setRequestHeader('Accept', 'text/event-stream')
 
+      this.xhr.onprogress = () => {
+        console.log('[sse] xhr progress', {
+          url: this.url,
+          status: this.xhr.status,
+          readyState: this.xhr.readyState,
+          responseLength: String(this.xhr.responseText || '').length
+        })
+        this._processData()
+      }
+
       this.xhr.onreadystatechange = () => {
+        console.log('[sse] xhr readyState', {
+          url: this.url,
+          readyState: this.xhr.readyState,
+          status: this.xhr.status,
+          responseLength: String(this.xhr.responseText || '').length
+        })
         if (this.xhr.readyState === 3) {
           this._processData()
         } else if (this.xhr.readyState === 4) {
@@ -193,8 +216,18 @@ export class SSEClient {
     if (this.closed) return
     try {
       const text = String(responseText || '')
-      this.eventBuffer += text.substring(this.responseOffset)
+      const previousOffset = this.responseOffset
+      const appendedText = text.substring(previousOffset)
+      this.eventBuffer += appendedText
       this.responseOffset = text.length
+      if (appendedText.length) {
+        console.log('[sse] process text chunk', {
+          url: this.url,
+          appendedLength: appendedText.length,
+          totalLength: text.length,
+          bufferLength: this.eventBuffer.length
+        })
+      }
 
       let delimiter = this.eventBuffer.match(/\r?\n\r?\n/)
       while (delimiter) {
@@ -225,13 +258,21 @@ export class SSEClient {
 
     const eventData = dataLines.join('\n')
     try {
-      this.emit('message', JSON.parse(eventData))
+      const parsed = JSON.parse(eventData)
+      console.log('[sse] event parsed', {
+        url: this.url,
+        type: parsed && parsed.type,
+        reply_id: parsed && parsed.reply_id,
+        dataLength: eventData.length
+      })
+      this.emit('message', parsed)
     } catch (error) {
       console.error('Invalid SSE message:', eventData, error)
     }
   }
 
   close() {
+    console.log('[sse] close called', { url: this.url, hasXhr: !!this.xhr, hasRequestTask: !!this.requestTask })
     this.closed = true
     if (this.xhr) {
       this.xhr.abort()
@@ -246,6 +287,13 @@ export class SSEClient {
 }
 
 export const streamChat = async (data, onMessage, onError, onClose) => {
+  console.log('[sse] streamChat create', {
+    text: data && data.text,
+    user_id: data && data.user_id,
+    session_id: data && data.session_id,
+    latitude: data && data.latitude,
+    longitude: data && data.longitude
+  })
   const client = new SSEClient('/chat/stream')
 
   if (onMessage) client.on('message', onMessage)
@@ -253,6 +301,7 @@ export const streamChat = async (data, onMessage, onError, onClose) => {
   if (onClose) client.on('close', onClose)
 
   await client.send(data)
+  console.log('[sse] streamChat send resolved', { text: data && data.text })
   return client
 }
 

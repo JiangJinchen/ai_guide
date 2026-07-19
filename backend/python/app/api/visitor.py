@@ -908,8 +908,20 @@ def get_spot_guide(spot_id: int, db: Session = Depends(get_db)):
 # ==============================
 @router.post("/chat", response_model=MessageResponse)
 async def chat(request: MessageRequest, db: Session = Depends(get_db)):
+    logger.info('[chat] start %s', {
+        'text': request.text,
+        'user_id': request.user_id,
+        'session_id': request.session_id,
+        'latitude': request.latitude,
+        'longitude': request.longitude,
+    })
     emotion_result = await analyze_emotion(text=request.text)
     user_emotion = emotion_result.get("emotion", "neutral")
+    logger.info('[chat] emotion analyzed %s', {
+        'emotion': user_emotion,
+        'source': emotion_result.get('source', ''),
+        'reason': emotion_result.get('reason', emotion_result.get('note', '')),
+    })
 
     interaction = VisitorInteraction(
         visitor_id=request.user_id,
@@ -1044,8 +1056,20 @@ def get_chat_history(user_id: str, session_id: Optional[str] = None, db: Session
 # ==============================
 @router.post("/chat/stream")
 async def chat_stream(request: MessageRequest, db: Session = Depends(get_db)):
+    logger.info('[chat_stream] start %s', {
+        'text': request.text,
+        'user_id': request.user_id,
+        'session_id': request.session_id,
+        'latitude': request.latitude,
+        'longitude': request.longitude,
+    })
     emotion_result = await analyze_emotion(text=request.text)
     user_emotion = emotion_result.get("emotion", "neutral")
+    logger.info('[chat_stream] emotion analyzed %s', {
+        'emotion': user_emotion,
+        'source': emotion_result.get('source', ''),
+        'reason': emotion_result.get('reason', emotion_result.get('note', '')),
+    })
 
     interaction = VisitorInteraction(
         visitor_id=request.user_id,
@@ -1062,6 +1086,11 @@ async def chat_stream(request: MessageRequest, db: Session = Depends(get_db)):
     reply_id = uuid.uuid4().hex
 
     async def generate():
+        logger.info('[chat_stream] generator start %s', {
+            'text': request.text,
+            'reply_id': reply_id,
+            'user_emotion': user_emotion,
+        })
         full_text = ""
         speech_lead_text = ""
         meta_marker = "__STREAM_META__"
@@ -1093,17 +1122,29 @@ async def chat_stream(request: MessageRequest, db: Session = Depends(get_db)):
 
         from app.api.dialog_orchestrator import orchestrate_chat
 
+        user_location = {
+            "latitude": request.latitude,
+            "longitude": request.longitude,
+        } if request.latitude is not None and request.longitude is not None else None
+        logger.info('[chat_stream] orchestrate start %s', {
+            'text': request.text,
+            'user_location': user_location,
+        })
         orchestration = await orchestrate_chat(
             text=request.text,
             user_id=request.user_id,
             db=db,
             emotion_result=emotion_result,
-            user_location={
-                "latitude": request.latitude,
-                "longitude": request.longitude,
-            } if request.latitude is not None and request.longitude is not None else None,
+            user_location=user_location,
             session_id=request.session_id,
         )
+        logger.info('[chat_stream] orchestrate done %s', {
+            'handled': orchestration.handled,
+            'reply_mode': orchestration.reply_mode,
+            'reply_text': orchestration.reply_text,
+            'actions': orchestration.actions,
+            'context': orchestration.context,
+        })
         if orchestration.handled:
             full_text = orchestration.reply_text
             content_data = {
@@ -1111,6 +1152,11 @@ async def chat_stream(request: MessageRequest, db: Session = Depends(get_db)):
                 'text': f"{emotion_prefix}{full_text}",
                 'reply_id': reply_id,
             }
+            logger.info('[chat_stream] yield orchestrated content %s', {
+                'reply_id': reply_id,
+                'text_length': len(content_data['text']),
+                'action_count': len(orchestration.actions or []),
+            })
             yield f"data: {json.dumps(content_data)}\n\n"
             metadata = build_metadata(
                 {
@@ -1121,9 +1167,23 @@ async def chat_stream(request: MessageRequest, db: Session = Depends(get_db)):
                 },
                 service_actions=orchestration.actions,
             )
+            logger.info('[chat_stream] yield orchestrated metadata %s', {
+                'reply_id': reply_id,
+                'metadata_keys': list(metadata.keys()),
+            })
             yield f"data: {json.dumps(metadata)}\n\n"
+            logger.info('[chat_stream] generator end %s', {
+                'text': request.text,
+                'reply_id': reply_id,
+                'full_text_length': len(full_text),
+                'handled': True,
+            })
             return
 
+        logger.info('[chat_stream] fallback ai stream start %s', {
+            'reply_id': reply_id,
+            'user_emotion': user_emotion,
+        })
         async for chunk in ai_stream_inference(
             AIRequest(
                 text=request.text,
@@ -1139,6 +1199,10 @@ async def chat_stream(request: MessageRequest, db: Session = Depends(get_db)):
                 except json.JSONDecodeError:
                     print(f"[CHAT STREAM] Failed to parse metadata: {chunk[:150]}")
                     meta = {}
+                logger.info('[chat_stream] yield metadata chunk %s', {
+                    'reply_id': reply_id,
+                    'meta_keys': list(meta.keys()),
+                })
                 yield f"data: {json.dumps(build_metadata(meta))}\n\n"
                 continue
 
@@ -1155,7 +1219,7 @@ async def chat_stream(request: MessageRequest, db: Session = Depends(get_db)):
                     f"{emotion_prefix}{full_text}",
                     max_chars=None,
                 )
-                sentence_match = re.match(r"^.{12,}?[。！？!?；;]", partial_speech)
+                sentence_match = re.match(r"^.{12,}?[\u3002\uff01\uff1f!?\uff1b;]", partial_speech)
                 if sentence_match:
                     speech_lead_text = sentence_match.group(0).strip()
                     speech_data = {
@@ -1163,8 +1227,18 @@ async def chat_stream(request: MessageRequest, db: Session = Depends(get_db)):
                         'text': speech_lead_text,
                         'reply_id': reply_id,
                     }
+                    logger.info('[chat_stream] yield speech lead %s', {
+                        'reply_id': reply_id,
+                        'speech_lead_length': len(speech_lead_text),
+                    })
                     yield f"data: {json.dumps(speech_data)}\n\n"
 
+        logger.info('[chat_stream] generator end %s', {
+            'text': request.text,
+            'reply_id': reply_id,
+            'full_text_length': len(full_text),
+            'handled': False,
+        })
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",

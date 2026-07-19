@@ -1,3 +1,4 @@
+import logging
 import math
 import re
 from collections import defaultdict, deque
@@ -7,6 +8,9 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from app.models import AppUserBehavior, RouteHistory, ScenicActivity, Spot, TicketProduct, VisitorInteraction
+
+
+logger = logging.getLogger(__name__)
 
 
 SESSION_MEMORY: Dict[str, deque] = defaultdict(lambda: deque(maxlen=6))
@@ -1552,33 +1556,56 @@ async def orchestrate_chat(
     conditions = detect_conditions(text)
     previous_state = get_conversation_state(memory_key)
     conversation_state = derive_turn_state(text, db, states, conditions, previous_state)
+    logger.info('[orchestrate_chat] start %s', {
+        'text': text,
+        'user_id': user_id,
+        'user_location': user_location,
+        'states': states,
+        'conditions': conditions,
+        'previous_state': previous_state,
+        'conversation_state': conversation_state,
+    })
 
     handlers = [
-        lambda: resolve_confirmation(text, memory_key, db),
-        lambda: handle_general_chat(text),
-        lambda: handle_activities(text, db, conditions, conversation_state),
-        lambda: handle_tickets(text, db),
-        lambda: handle_spot_list(text, db),
-        lambda: handle_contextual_spot_question(text, db, memory_key, conversation_state),
-        lambda: handle_scenic_general_info(text, db),
-        lambda: handle_history(text, user_id, db, conditions),
-        lambda: handle_route_request(text, conditions),
-        lambda: handle_nearby(text, db, states, conditions, user_location, user_id, session_id, memory_key, conversation_state),
-        lambda: handle_spot_navigation_or_guide(text, db, states),
+        ('resolve_confirmation', lambda: resolve_confirmation(text, memory_key, db)),
+        ('handle_general_chat', lambda: handle_general_chat(text)),
+        ('handle_activities', lambda: handle_activities(text, db, conditions, conversation_state)),
+        ('handle_tickets', lambda: handle_tickets(text, db)),
+        ('handle_spot_list', lambda: handle_spot_list(text, db)),
+        ('handle_contextual_spot_question', lambda: handle_contextual_spot_question(text, db, memory_key, conversation_state)),
+        ('handle_scenic_general_info', lambda: handle_scenic_general_info(text, db)),
+        ('handle_history', lambda: handle_history(text, user_id, db, conditions)),
+        ('handle_route_request', lambda: handle_route_request(text, conditions)),
+        ('handle_nearby', lambda: handle_nearby(text, db, states, conditions, user_location, user_id, session_id, memory_key, conversation_state)),
+        ('handle_spot_navigation_or_guide', lambda: handle_spot_navigation_or_guide(text, db, states)),
     ]
 
-    for handler in handlers:
+    for handler_name, handler in handlers:
+        logger.info('[orchestrate_chat] handler start %s', {'handler': handler_name})
         result = handler()
+        logger.info('[orchestrate_chat] handler done %s', {
+            'handler': handler_name,
+            'has_result': bool(result),
+            'handled': bool(result and result.handled),
+            'reply_text': result.reply_text if result else '',
+            'actions': result.actions if result else [],
+            'context': result.context if result else {},
+        })
         if result and result.handled:
             next_state = apply_result_to_state(conversation_state, result)
+            logger.info('[orchestrate_chat] handler matched %s', {
+                'handler': handler_name,
+                'next_state': next_state,
+            })
             remember(memory_key, {
-                "text": text,
-                "states": states,
-                "conditions": conditions,
-                "conversation_state": next_state,
+                'text': text,
+                'states': states,
+                'conditions': conditions,
+                'conversation_state': next_state,
                 **result.context,
             })
             return result
+
 
     remember(memory_key, {
         "text": text,
