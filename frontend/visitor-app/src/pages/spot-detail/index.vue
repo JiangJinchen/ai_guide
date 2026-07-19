@@ -300,7 +300,7 @@ export default {
         this.recordViewBehavior(duration)
       }
     }
-    this.destroyAudio()
+    this.destroyAudio({ skipDigitalHuman: true })
   },
   methods: {
     onDigitalReady() {
@@ -646,7 +646,7 @@ export default {
         this.isPlaying = false
       }
     },
-    destroyAudio() {
+    destroyAudio(options = {}) {
       if (!this.audioElement) return
       try {
         if (this.audioElementType === 'html') {
@@ -670,7 +670,7 @@ export default {
       this.currentTime = 0
       this.duration = 0
       this.playbackPercent = 0
-      if (this.$refs.digitalHuman) {
+      if (!options.skipDigitalHuman && this.$refs.digitalHuman) {
         this.$refs.digitalHuman.stopSpeaking()
       }
     },

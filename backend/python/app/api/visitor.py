@@ -505,12 +505,23 @@ AMAP_WALKING_URL = "https://restapi.amap.com/v3/direction/walking"
 AMAP_GEOCODE_URL = "https://restapi.amap.com/v3/geocode/geo"
 AMAP_PLACE_AROUND_URL = "https://restapi.amap.com/v3/place/around"
 try:
-    AMAP_NAVIGATION_TIMEOUT_SECONDS = max(1.2, float(os.getenv("AMAP_NAVIGATION_TIMEOUT_SECONDS", "2.5")))
+    AMAP_NAVIGATION_TIMEOUT_SECONDS = max(3.0, float(os.getenv("AMAP_NAVIGATION_TIMEOUT_SECONDS", "6.0")))
 except (TypeError, ValueError):
-    AMAP_NAVIGATION_TIMEOUT_SECONDS = 2.5
+    AMAP_NAVIGATION_TIMEOUT_SECONDS = 6.0
+try:
+    AMAP_NAVIGATION_CONNECT_TIMEOUT_SECONDS = max(
+        1.2,
+        float(os.getenv("AMAP_NAVIGATION_CONNECT_TIMEOUT_SECONDS", "3.0"))
+    )
+except (TypeError, ValueError):
+    AMAP_NAVIGATION_CONNECT_TIMEOUT_SECONDS = 3.0
+try:
+    AMAP_NAVIGATION_RETRY_COUNT = max(1, int(os.getenv("AMAP_NAVIGATION_RETRY_COUNT", "2")))
+except (TypeError, ValueError):
+    AMAP_NAVIGATION_RETRY_COUNT = 2
 SCENIC_ENTRANCE_FALLBACK = {
-    "latitude": 31.42892,
-    "longitude": 120.09487,
+    "latitude": 31.420196,
+    "longitude": 120.103651,
     "name": "灵山胜境游客中心",
     "address": "无锡灵山胜境游客中心",
     "source": "local_config"
@@ -2633,17 +2644,30 @@ def fetch_amap_walking_navigation(origin, destination, timeout_seconds=AMAP_NAVI
     }
 
     try:
+        connect_timeout = min(AMAP_NAVIGATION_CONNECT_TIMEOUT_SECONDS, timeout_seconds)
         timeout = httpx.Timeout(
             timeout_seconds,
-            connect=min(1.2, timeout_seconds),
+            connect=connect_timeout,
             read=timeout_seconds,
-            write=min(1.2, timeout_seconds),
-            pool=min(1.0, timeout_seconds),
+            write=connect_timeout,
+            pool=connect_timeout,
         )
-        with httpx.Client(timeout=timeout, verify=False) as client:
-            response = client.get(AMAP_WALKING_URL, params=params)
-            response.raise_for_status()
-            payload = response.json()
+        for attempt in range(1, AMAP_NAVIGATION_RETRY_COUNT + 1):
+            try:
+                with httpx.Client(timeout=timeout, verify=False) as client:
+                    response = client.get(AMAP_WALKING_URL, params=params)
+                    response.raise_for_status()
+                    payload = response.json()
+                break
+            except httpx.TimeoutException:
+                if attempt >= AMAP_NAVIGATION_RETRY_COUNT:
+                    raise
+                logger.warning(
+                    "[AMAP] request timeout, retrying attempt=%s/%s",
+                    attempt,
+                    AMAP_NAVIGATION_RETRY_COUNT,
+                )
+                time.sleep(0.25 * attempt)
 
         status = payload.get("status")
         if status != "1":
@@ -2854,15 +2878,14 @@ def build_navigation_route(request: NavigationRouteRequest):
     segments = []
     providers = []
     previous = start
-    amap_disabled_for_request = request.provider != "amap"
+    amap_enabled = request.provider == "amap"
     for index, destination in enumerate(waypoints):
         segment = None
-        if not amap_disabled_for_request:
+        if amap_enabled:
             segment = fetch_amap_walking_navigation(previous, destination)
             if not segment:
-                amap_disabled_for_request = True
                 logger.warning(
-                    "[NAV] amap disabled for remaining segments after segment %s failed; use local fallback for this request",
+                    "[NAV] segment %s amap failed; use local fallback for this segment only",
                     index + 1
                 )
         if not segment:
