@@ -741,7 +741,7 @@ export default {
       return /document unavailable|stage unavailable|querySelector|appendChild|Cannot read property|Cannot read properties|renderjs document unavailable|renderjs stage unavailable/i.test(message)
     },
     resolveResourcePath(src) {
-      const value = String(src || '')
+      const value = typeof src === 'string' ? src.trim() : String(src || '')
       if (!value || /^(https?:|data:|file:)/.test(value)) return value
       if (typeof plus !== 'undefined' && plus.io && typeof plus.io.convertLocalFileSystemURL === 'function') {
         const localValue = value.indexOf('/static/') === 0 ? `_www${value}` : value
@@ -1046,17 +1046,24 @@ export default {
     },
     destroyLive2D() {
       console.log('[digital-human][renderjs] destroyLive2D', { initialized: this.initialized, initializing: this.initializing, hasModel: !!this.model, initGeneration: this.initGeneration, lastActionSeq: this.lastActionSeq })
-      this.stopLipSync()
-      this.unbindMouthUpdate()
-      this.unbindLive2DTicker()
-      this.clearInitRetry()
-      if (this.app) { try { this.app.destroy(true, { children: true, texture: true, baseTexture: true }) } catch (error) {}; this.app = null }
-      this.model = null
-      this.coreModelCache = null
-      this.currentExpression = ''
-      this.currentMotion = ''
-      this.initialized = false
-      this.initializing = false
+      try {
+        this.stopLipSync()
+        this.unbindMouthUpdate()
+        this.unbindLive2DTicker()
+        this.clearInitRetry()
+        if (this.app) {
+          try { this.app.destroy(true, { children: true, texture: true, baseTexture: true }) } catch (error) {}
+          this.app = null
+        }
+        this.model = null
+        this.coreModelCache = null
+        this.currentExpression = ''
+        this.currentMotion = ''
+        this.initialized = false
+        this.initializing = false
+      } catch (error) {
+        console.warn('[digital-human][renderjs] destroyLive2D failed', error)
+      }
     }
   }
 }

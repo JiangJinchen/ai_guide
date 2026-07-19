@@ -130,7 +130,7 @@
 <script>
 import DigitalHuman from '@/components/digital-human-simple/index.vue'
 import FeedbackModal from '@/components/FeedbackModal/index.vue'
-import { get, post } from '@/utils/request'
+import { BASE_URL, get, post } from '@/utils/request'
 import { promptForFeedback, markFeedbackPrompt, openFeedbackPage } from '@/utils/feedback'
 import { getSpotImage } from '@/utils/spot-images'
 
@@ -155,6 +155,7 @@ export default {
       guideContent: null,
       guideAsset: null,
       audioElement: null,
+      audioElementType: '',
       audioUrl: '',
       nearbyData: null,
       popularityData: null,
@@ -305,7 +306,11 @@ export default {
     onDigitalReady() {
       this.digitalReady = true
       if (this.isPlaying && this.audioElement && this.$refs.digitalHuman) {
-        this.$refs.digitalHuman.startRealLipSync(this.audioElement)
+        if (this.audioElementType === 'html') {
+          this.$refs.digitalHuman.startRealLipSync(this.audioElement)
+        } else {
+          this.$refs.digitalHuman.startSpeaking({ motion: 'Tap' })
+        }
       }
     },
     onDigitalError(error) {
@@ -453,74 +458,214 @@ export default {
         this.scheduleGuideFeedbackPrompt()
       }
     },
+    resolveAudioSource(url) {
+      const value = String(url || '').trim()
+      if (!value) return ''
+      if (/^(https?:|file:|blob:|data:|wxfile:|_www\/|_doc\/)/i.test(value)) return value
+      const backendRoot = BASE_URL.replace(/\/api\/?$/, '')
+      if (value.startsWith('/api/')) return `${backendRoot}${value}`
+      if (value.startsWith('/')) return `${backendRoot}${value}`
+      return value
+    },
     prepareAudio() {
       this.currentTime = 0
       this.duration = 0
       this.playbackPercent = 0
       this.isPlaying = false
+      this.audioElementType = ''
       if (!this.audioUrl) {
         console.log('[AUDIO DEBUG] prepareAudio: audioUrl is empty')
         return
       }
 
-      console.log('[AUDIO DEBUG] Creating Audio element with URL:', this.audioUrl)
-      this.audioElement = new Audio(this.audioUrl)
-      this.audioElement.preload = 'auto'
-      this.audioElement.onloadedmetadata = () => {
-        this.duration = Number.isFinite(this.audioElement.duration) ? this.audioElement.duration : 0
-        console.log('[AUDIO DEBUG] onloadedmetadata: duration =', this.duration)
-      }
-      this.audioElement.ontimeupdate = () => {
-        if (!this.audioElement) return
-        this.currentTime = this.audioElement.currentTime || 0
-        this.duration = Number.isFinite(this.audioElement.duration) ? this.audioElement.duration : this.duration
+      const resolvedAudioUrl = this.resolveAudioSource(this.audioUrl)
+      console.log('[AUDIO DEBUG] prepareAudio environment:', {
+        audioUrl: this.audioUrl,
+        resolvedAudioUrl,
+        hasWindow: typeof window !== 'undefined',
+        audioType: typeof Audio,
+        hasCreateInnerAudioContext: typeof uni !== 'undefined' && typeof uni.createInnerAudioContext === 'function'
+      })
+
+      const updateProgress = (current, total) => {
+        this.currentTime = Number(current) || 0
+        if (Number.isFinite(Number(total)) && Number(total) > 0) {
+          this.duration = Number(total)
+        }
         this.playbackPercent = this.duration > 0 ? Math.min(100, Math.max(0, Math.round((this.currentTime / this.duration) * 100))) : 0
       }
-      this.audioElement.onplay = () => {
-        this.isPlaying = true
-        if (this.$refs.digitalHuman && this.digitalReady) {
+
+      const startDigitalHuman = () => {
+        if (!this.$refs.digitalHuman || !this.digitalReady) return
+        if (this.audioElementType === 'html') {
           this.$refs.digitalHuman.startRealLipSync(this.audioElement)
+        } else {
+          this.$refs.digitalHuman.startSpeaking({ motion: 'Tap' })
         }
       }
-      this.audioElement.onpause = () => {
-        this.isPlaying = false
-        if (this.$refs.digitalHuman) {
-          this.$refs.digitalHuman.stopSpeaking()
+
+      try {
+        if (typeof Audio === 'function') {
+          console.log('[AUDIO DEBUG] Creating HTML Audio element with URL:', resolvedAudioUrl)
+          this.audioElement = new Audio(resolvedAudioUrl)
+          this.audioElementType = 'html'
+          this.audioElement.preload = 'auto'
+          this.audioElement.onloadedmetadata = () => {
+            updateProgress(this.audioElement.currentTime, this.audioElement.duration)
+            console.log('[AUDIO DEBUG] html onloadedmetadata:', {
+              duration: this.duration,
+              readyState: this.audioElement?.readyState,
+              networkState: this.audioElement?.networkState,
+              currentSrc: this.audioElement?.currentSrc
+            })
+          }
+          this.audioElement.ontimeupdate = () => {
+            if (!this.audioElement) return
+            updateProgress(this.audioElement.currentTime, this.audioElement.duration)
+          }
+          this.audioElement.onplay = () => {
+            console.log('[AUDIO DEBUG] html onplay:', {
+              currentTime: this.audioElement?.currentTime,
+              duration: this.audioElement?.duration,
+              readyState: this.audioElement?.readyState
+            })
+            this.isPlaying = true
+            startDigitalHuman()
+          }
+          this.audioElement.onpause = () => {
+            console.log('[AUDIO DEBUG] html onpause:', {
+              currentTime: this.audioElement?.currentTime,
+              duration: this.audioElement?.duration
+            })
+            this.isPlaying = false
+            if (this.$refs.digitalHuman) this.$refs.digitalHuman.stopSpeaking()
+          }
+          this.audioElement.onended = () => {
+            console.log('[AUDIO DEBUG] html onended')
+            this.isPlaying = false
+            this.currentTime = 0
+            this.playbackPercent = 0
+            if (this.$refs.digitalHuman) this.$refs.digitalHuman.stopSpeaking()
+          }
+          this.audioElement.onerror = (e) => {
+            const failedUrl = resolvedAudioUrl
+            const audioError = this.audioElement?.error
+            this.isPlaying = false
+            this.audioUrl = ''
+            console.error('[AUDIO DEBUG] HTML Audio error event:', e)
+            console.error('[AUDIO DEBUG] HTML Audio error details:', {
+              url: failedUrl,
+              currentSrc: this.audioElement?.currentSrc,
+              readyState: this.audioElement?.readyState,
+              networkState: this.audioElement?.networkState,
+              error: audioError?.message,
+              code: audioError?.code
+            })
+            uni.showToast({ title: '讲解音频加载失败', icon: 'none' })
+            if (this.$refs.digitalHuman) this.$refs.digitalHuman.stopSpeaking()
+          }
+          return
         }
-      }
-      this.audioElement.onended = () => {
-        this.isPlaying = false
-        this.currentTime = 0
-        this.playbackPercent = 0
-        if (this.$refs.digitalHuman) {
-          this.$refs.digitalHuman.stopSpeaking()
+
+        if (typeof uni !== 'undefined' && typeof uni.createInnerAudioContext === 'function') {
+          console.log('[AUDIO DEBUG] Creating innerAudioContext with URL:', resolvedAudioUrl)
+          const innerAudio = uni.createInnerAudioContext()
+          this.audioElement = innerAudio
+          this.audioElementType = 'inner'
+          innerAudio.autoplay = false
+          innerAudio.volume = 1
+          innerAudio.src = resolvedAudioUrl
+          innerAudio.onCanplay(() => {
+            setTimeout(() => {
+              if (!this.audioElement || this.audioElementType !== 'inner') return
+              updateProgress(innerAudio.currentTime, innerAudio.duration)
+              console.log('[AUDIO DEBUG] inner onCanplay:', {
+                duration: innerAudio.duration,
+                currentTime: innerAudio.currentTime,
+                src: innerAudio.src
+              })
+            }, 300)
+          })
+          innerAudio.onTimeUpdate(() => {
+            updateProgress(innerAudio.currentTime, innerAudio.duration)
+          })
+          innerAudio.onPlay(() => {
+            console.log('[AUDIO DEBUG] inner onPlay:', {
+              currentTime: innerAudio.currentTime,
+              duration: innerAudio.duration,
+              src: innerAudio.src
+            })
+            this.isPlaying = true
+            startDigitalHuman()
+          })
+          innerAudio.onPause(() => {
+            console.log('[AUDIO DEBUG] inner onPause:', {
+              currentTime: innerAudio.currentTime,
+              duration: innerAudio.duration
+            })
+            this.isPlaying = false
+            if (this.$refs.digitalHuman) this.$refs.digitalHuman.stopSpeaking()
+          })
+          innerAudio.onEnded(() => {
+            console.log('[AUDIO DEBUG] inner onEnded')
+            this.isPlaying = false
+            this.currentTime = 0
+            this.playbackPercent = 0
+            if (this.$refs.digitalHuman) this.$refs.digitalHuman.stopSpeaking()
+          })
+          innerAudio.onError((error) => {
+            const failedUrl = resolvedAudioUrl
+            this.isPlaying = false
+            this.audioUrl = ''
+            console.error('[AUDIO DEBUG] innerAudioContext error:', {
+              url: failedUrl,
+              currentTime: innerAudio.currentTime,
+              duration: innerAudio.duration,
+              error
+            })
+            uni.showToast({ title: '讲解音频加载失败', icon: 'none' })
+            if (this.$refs.digitalHuman) this.$refs.digitalHuman.stopSpeaking()
+          })
+          return
         }
-      }
-      this.audioElement.onerror = (e) => {
-        this.isPlaying = false
-        this.audioUrl = ''
-        console.error('[AUDIO DEBUG] Audio error:', e)
-        console.error('[AUDIO DEBUG] Audio error details:', {
-          error: this.audioElement?.error?.message,
-          code: this.audioElement?.error?.code,
-          url: this.audioUrl
+
+        throw new Error('No supported audio API is available in this runtime')
+      } catch (e) {
+        console.error('[AUDIO DEBUG] prepareAudio failed:', {
+          audioUrl: this.audioUrl,
+          audioType: typeof Audio,
+          hasCreateInnerAudioContext: typeof uni !== 'undefined' && typeof uni.createInnerAudioContext === 'function',
+          errorName: e?.name,
+          errorMessage: e?.message,
+          errorStack: e?.stack,
+          rawError: e
         })
-        uni.showToast({ title: '讲解音频加载失败', icon: 'none' })
-        if (this.$refs.digitalHuman) {
-          this.$refs.digitalHuman.stopSpeaking()
-        }
+        this.audioElement = null
+        this.audioElementType = ''
+        this.audioUrl = ''
+        this.isPlaying = false
       }
     },
     destroyAudio() {
       if (!this.audioElement) return
-      this.audioElement.onloadedmetadata = null
-      this.audioElement.ontimeupdate = null
-      this.audioElement.onplay = null
-      this.audioElement.onpause = null
-      this.audioElement.onended = null
-      this.audioElement.onerror = null
-      this.audioElement.pause()
+      try {
+        if (this.audioElementType === 'html') {
+          this.audioElement.onloadedmetadata = null
+          this.audioElement.ontimeupdate = null
+          this.audioElement.onplay = null
+          this.audioElement.onpause = null
+          this.audioElement.onended = null
+          this.audioElement.onerror = null
+          if (typeof this.audioElement.pause === 'function') this.audioElement.pause()
+        } else if (this.audioElementType === 'inner') {
+          // App runtime may throw "indexOf of undefined" when innerAudioContext
+          // off* cleanup is called without the original callback during unload.
+        }
+      } catch (error) {
+        console.warn('[AUDIO DEBUG] destroyAudio failed:', error)
+      }
       this.audioElement = null
+      this.audioElementType = ''
       this.isPlaying = false
       this.currentTime = 0
       this.duration = 0
@@ -534,6 +679,7 @@ export default {
       console.log('[AUDIO DEBUG] canPlayAudio:', this.canPlayAudio)
       console.log('[AUDIO DEBUG] audioUrl:', this.audioUrl)
       console.log('[AUDIO DEBUG] audioElement exists:', !!this.audioElement)
+      console.log('[AUDIO DEBUG] audioElementType:', this.audioElementType)
       if (!this.canPlayAudio) {
         uni.showToast({ title: '讲解音频尚未生成', icon: 'none' })
         return
@@ -545,16 +691,25 @@ export default {
       if (!this.audioElement) return
 
       try {
-        if (this.audioElement.paused) {
-          console.log('[AUDIO DEBUG] Calling play()')
-          await this.audioElement.play()
-          console.log('[AUDIO DEBUG] play() succeeded')
+        const shouldPlay = this.audioElementType === 'inner' ? !this.isPlaying : this.audioElement.paused
+        if (shouldPlay) {
+          console.log('[AUDIO DEBUG] Calling play()', { audioElementType: this.audioElementType })
+          const playResult = this.audioElement.play()
+          if (playResult && typeof playResult.then === 'function') await playResult
+          console.log('[AUDIO DEBUG] play() invoked')
         } else {
-          console.log('[AUDIO DEBUG] Calling pause()')
+          console.log('[AUDIO DEBUG] Calling pause()', { audioElementType: this.audioElementType })
           this.audioElement.pause()
         }
       } catch (e) {
-        console.error('[AUDIO DEBUG] Playback error:', e)
+        console.error('[AUDIO DEBUG] Playback error:', {
+          audioElementType: this.audioElementType,
+          audioUrl: this.audioUrl,
+          errorName: e?.name,
+          errorMessage: e?.message,
+          errorStack: e?.stack,
+          rawError: e
+        })
         uni.showToast({ title: '无法播放讲解音频', icon: 'none' })
       }
     },
@@ -563,7 +718,11 @@ export default {
       const value = Number(event.detail.value || 0)
       this.playbackPercent = value
       this.currentTime = (this.duration * value) / 100
-      this.audioElement.currentTime = this.currentTime
+      if (this.audioElementType === 'inner' && typeof this.audioElement.seek === 'function') {
+        this.audioElement.seek(this.currentTime)
+      } else {
+        this.audioElement.currentTime = this.currentTime
+      }
     },
     formatTime(seconds) {
       const value = Math.max(0, Math.floor(Number(seconds) || 0))
