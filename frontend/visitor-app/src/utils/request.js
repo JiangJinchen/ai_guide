@@ -1,4 +1,4 @@
-﻿const BASE_URL = 'http://192.168.208.6:8000/api' //手机热点
+﻿export const BASE_URL = 'http://192.168.208.6:8000/api' //手机热点
 //const BASE_URL = 'http://10.27.246.115:8000/api' //校园网
 
 const normalizeUrl = (url) => {
@@ -8,7 +8,7 @@ const normalizeUrl = (url) => {
   return `/visitor${url.startsWith('/') ? url : `/${url}`}`
 }
 
-const formatToastMessage = (detail, fallback = '璇锋眰澶辫触') => {
+const formatToastMessage = (detail, fallback = '请求失败') => {
   if (typeof detail === 'string' && detail.trim()) {
     return detail
   }
@@ -98,7 +98,7 @@ const request = (options) => {
               data: res.data
             })
           }
-          const message = formatToastMessage(res.data?.detail, '璇锋眰澶辫触')
+          const message = formatToastMessage(res.data?.detail, '请求失败')
           if (!options.silent) uni.showToast({ title: message, icon: 'none' })
           reject(res)
         }
@@ -126,3 +126,4 @@ export const put = (url, data = {}, options = {}) => request({ url, method: 'PUT
 export const del = (url, data = {}, options = {}) => request({ url, method: 'DELETE', data, ...options })
 
 export default request
+

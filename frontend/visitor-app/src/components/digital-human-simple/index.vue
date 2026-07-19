@@ -703,7 +703,7 @@ const STATUS_MOTION_OPTIONS = { idle: { motion: 'Idle' }, listen: { motion: 'Fli
 
 export default {
   data() {
-    return { app: null, model: null, initialized: false, initializing: false, lastState: null, lastActionSeq: 0, currentExpression: '', currentMotion: '', mouthOpenValue: 0, lipSyncTimer: null, isSpeakingNow: false, coreModelCache: null, mouthUpdateHandler: null, tickerMouthHandler: null, live2dTickerHandler: null, initRetryTimer: null, initRetryCount: 0, initRetryReason: '' }
+    return { app: null, model: null, initialized: false, initializing: false, lastState: null, lastActionSeq: 0, currentExpression: '', currentMotion: '', mouthOpenValue: 0, lipSyncTimer: null, isSpeakingNow: false, coreModelCache: null, mouthUpdateHandler: null, tickerMouthHandler: null, live2dTickerHandler: null, initRetryTimer: null, initRetryCount: 0, initRetryReason: '', initGeneration: 0 }
   },
   mounted() { this.initFromCurrentState() },
   beforeDestroy() { this.clearInitRetry(); this.destroyLive2D() },
@@ -820,6 +820,7 @@ export default {
     async initLive2D(state = {}) {
       if (this.initializing) return
       this.initializing = true
+      const generation = ++this.initGeneration
       try {
         console.log('[digital-human][renderjs] init start', { model_path: state.modelPath || DEFAULT_MODEL_PATH, stage_id: state.stageId })
         if (!state.stageId) throw new Error('renderjs stage unavailable')
@@ -851,11 +852,18 @@ export default {
         this.coreModelCache = this.getCoreModel()
         this.bindMouthUpdate()
         this.bindLive2DTicker()
+        if (generation !== this.initGeneration) {
+          this.destroyLive2D()
+          return
+        }
         this.initialized = true
         this.applyState(state)
         console.log('[digital-human][renderjs] ready')
         this.notifyOwner('onRenderReady')
       } catch (error) {
+        if (generation !== this.initGeneration) {
+          return
+        }
         if (this.isTransientInitError(error) && this.initRetryCount < 60) {
           console.warn('[digital-human][renderjs] transient renderjs init issue', {
             reason: this.initRetryReason || (error && error.message ? error.message : String(error || '')),
@@ -875,7 +883,9 @@ export default {
         }
         this.notifyOwner('onRenderError', { message: error && error.message ? error.message : String(error || 'renderjs load failed') })
       } finally {
-        this.initializing = false
+        if (generation === this.initGeneration) {
+          this.initializing = false
+        }
       }
     },
     getStageElement(stageId) {
@@ -928,7 +938,15 @@ export default {
       const payload = action.payload || {}
       console.log('[digital-human][renderjs] action', { type: action.type, seq: action.seq })
       if (action.type === 'reload') return this.reload()
-      if (action.type === 'ensure') return this.app && this.app.start && this.app.start()
+      if (action.type === 'ensure') {
+        if (this.app && this.model) {
+          if (this.app.start) this.app.start()
+          this.notifyOwner('onRenderReady')
+        } else {
+          this.initFromCurrentState()
+        }
+        return
+      }
       if (action.type === 'pause') return this.app && this.app.stop && this.app.stop()
       if (action.type === 'destroy') return this.destroyLive2D()
       if (action.type === 'startSpeaking') return this.startSpeaking(payload)

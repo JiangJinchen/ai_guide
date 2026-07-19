@@ -160,7 +160,7 @@
 <script>
 import DigitalHuman from '@/components/digital-human-simple/index.vue'
 import FeedbackModal from '@/components/FeedbackModal/index.vue'
-import { get, post } from '@/utils/request'
+import { get, post, BASE_URL } from '@/utils/request'
 import { requestCurrentLocation, getLocationErrorMessage } from '@/utils/location'
 import { promptForFeedback, markFeedbackPrompt, openFeedbackPage } from '@/utils/feedback'
 import { streamChat } from '@/utils/sse'
@@ -997,17 +997,28 @@ export default {
       this.audioElement = null
       this.speechPlaybackActive = false
       if (this.status === 'speak') this.status = 'idle'
-      if (this.status === 'speak') this.status = 'idle'
       if (audio) {
-        try {
-          if (typeof audio.onplay !== 'undefined') audio.onplay = null
-          if (typeof audio.onended !== 'undefined') audio.onended = null
-          if (typeof audio.onerror !== 'undefined') audio.onerror = null
-          if (typeof audio.pause === 'function') audio.pause()
-          if (typeof audio.stop === 'function') audio.stop()
-          if (typeof audio.destroy === 'function') audio.destroy()
-        } catch (error) {
-          console.error('[chat] stop audio failed', error)
+        if (typeof audio.onplay !== 'undefined') audio.onplay = null
+        if (typeof audio.onended !== 'undefined') audio.onended = null
+        if (typeof audio.onerror !== 'undefined') audio.onerror = null
+        if (typeof audio.destroy === 'function') {
+          try {
+            audio.destroy()
+          } catch (error) {
+            console.warn('[chat] audio destroy failed', error)
+          }
+        } else if (typeof audio.stop === 'function') {
+          try {
+            audio.stop()
+          } catch (error) {
+            console.warn('[chat] audio stop failed', error)
+          }
+        } else if (typeof audio.pause === 'function') {
+          try {
+            audio.pause()
+          } catch (error) {
+            console.warn('[chat] audio pause failed', error)
+          }
         }
       }
 
@@ -1090,6 +1101,18 @@ export default {
       if (mime.includes('aac')) return 'aac'
       return 'mp3'
     },
+    resolveAudioSource(src) {
+      const value = String(src || '').trim()
+      if (!value) return ''
+      if (/^(https?:|file:|data:|blob:)/i.test(value)) return value
+      if (value.startsWith('/api/')) {
+        return BASE_URL.replace(/\/api\/?$/, '') + value
+      }
+      if (value.startsWith('/')) {
+        return BASE_URL.replace(/\/api\/?$/, '') + value
+      }
+      return value
+    },
     writeAppAudioFileWithAndroid(base64, fileName) {
       try {
         if (typeof plus === 'undefined' || !plus.android || !plus.io) return ''
@@ -1117,12 +1140,61 @@ export default {
         return ''
       }
     },
+    writeAppAudioFileWithPlusFs(base64, fileName, mime = 'audio/wav') {
+      return new Promise((resolve, reject) => {
+        if (typeof plus === 'undefined' || !plus.io || typeof plus.io.resolveLocalFileSystemURL !== 'function') {
+          reject(new Error('plus file system unavailable'))
+          return
+        }
+        const cleanBase64 = String(base64 || '').replace(/\s/g, '')
+        const localUrl = `_doc/${fileName}`
+        const makeBlob = () => {
+          if (typeof Blob !== 'function') {
+            throw new Error('blob unavailable')
+          }
+          if (typeof uni !== 'undefined' && typeof uni.base64ToArrayBuffer === 'function') {
+            return new Blob([uni.base64ToArrayBuffer(cleanBase64)], { type: mime || 'audio/wav' })
+          }
+          if (typeof atob === 'function') {
+            const binary = atob(cleanBase64)
+            const buffer = new Uint8Array(binary.length)
+            for (let i = 0; i < binary.length; i++) {
+              buffer[i] = binary.charCodeAt(i)
+            }
+            return new Blob([buffer], { type: mime || 'audio/wav' })
+          }
+          throw new Error('no base64 decoder available')
+        }
+        plus.io.resolveLocalFileSystemURL('_doc/', (dirEntry) => {
+          dirEntry.getFile(fileName, { create: true }, (fileEntry) => {
+            fileEntry.createWriter((writer) => {
+              const startAt = Date.now()
+              writer.onerror = (error) => {
+                console.error('[chat] plus fs audio write failed', error)
+                reject(error)
+              }
+              writer.onwriteend = () => {
+                const fullPath = typeof fileEntry.toLocalURL === 'function' ? fileEntry.toLocalURL() : localUrl
+                console.log('[chat] plus fs audio file ready', { local_url: localUrl, full_path: fullPath, cost_ms: Date.now() - startAt })
+                resolve(fullPath || localUrl)
+              }
+              writer.write(makeBlob())
+            }, reject)
+          }, reject)
+        }, reject)
+      })
+    },
     writeAppAudioFile(audioData) {
       return new Promise((resolve, reject) => {
         let settled = false
+        let writeTimeout = null
         const finish = (callback, value) => {
           if (settled) return
           settled = true
+          if (writeTimeout) {
+            clearTimeout(writeTimeout)
+            writeTimeout = null
+          }
           callback(value)
         }
         const parts = this.getAudioDataParts(audioData)
@@ -1132,24 +1204,24 @@ export default {
         }
         const ext = this.getAudioExtension(parts.mime)
         const fileName = `tts_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`
+        const fsAvailable = typeof uni.getFileSystemManager === 'function' && uni.env && uni.env.USER_DATA_PATH
+        const plusFsAvailable = typeof plus !== 'undefined' && plus.io && typeof plus.io.resolveLocalFileSystemURL === 'function'
+        const androidAvailable = typeof plus !== 'undefined' && plus.android && plus.io
+        console.log('[chat] write app audio file', {
+          file_name: fileName,
+          mime: parts.mime,
+          base64_length: parts.base64.length,
+          has_uni_fs: !!fsAvailable,
+          has_plus_fs: !!plusFsAvailable,
+          has_android: !!androidAvailable
+        })
+        writeTimeout = setTimeout(() => {
+          finish(reject, new Error('app audio write timeout'))
+        }, 5000)
 
-        if (typeof plus !== 'undefined' && plus.android && plus.io) {
-          const writeStartAt = Date.now()
-          console.log('[chat] write app audio file', { strategy: 'plus-android', file_name: fileName, mime: parts.mime, base64_length: parts.base64.length })
-          const audioPath = this.writeAppAudioFileWithAndroid(parts.base64, fileName)
-          if (audioPath) {
-            console.log('[chat] write app audio file done', { strategy: 'plus-android', cost_ms: Date.now() - writeStartAt })
-            finish(resolve, audioPath)
-          } else {
-            finish(reject, new Error('plus android audio write failed'))
-          }
-          return
-        }
-
-        if (typeof uni.getFileSystemManager === 'function' && uni.env && uni.env.USER_DATA_PATH) {
+        if (fsAvailable) {
           const writeStartAt = Date.now()
           const filePath = `${uni.env.USER_DATA_PATH}/${fileName}`
-          console.log('[chat] write app audio file', { strategy: 'uni-fs', file_path: filePath, mime: parts.mime, base64_length: parts.base64.length })
           uni.getFileSystemManager().writeFile({
             filePath,
             data: parts.base64,
@@ -1159,19 +1231,93 @@ export default {
               finish(resolve, filePath)
             },
             fail: (error) => {
-              console.error('[chat] uni-fs write failed', error)
-              finish(reject, error)
+              console.warn('[chat] uni-fs write failed, fallback to plus fs', error)
+              if (plusFsAvailable) {
+                const plusWriteStartAt = Date.now()
+                this.writeAppAudioFileWithPlusFs(parts.base64, fileName, parts.mime)
+                  .then((audioPath) => {
+                    console.log('[chat] write app audio file done', { strategy: 'plus-fs', cost_ms: Date.now() - plusWriteStartAt })
+                    finish(resolve, audioPath)
+                  })
+                  .catch((plusError) => {
+                    console.warn('[chat] plus fs write failed, fallback to android bridge', plusError)
+                    if (androidAvailable) {
+                      const audioPath = this.writeAppAudioFileWithAndroid(parts.base64, fileName)
+                      if (audioPath) {
+                        finish(resolve, audioPath)
+                      } else {
+                        finish(reject, new Error('android audio write failed'))
+                      }
+                    } else {
+                      finish(reject, plusError)
+                    }
+                  })
+              } else if (androidAvailable) {
+                const audioPath = this.writeAppAudioFileWithAndroid(parts.base64, fileName)
+                if (audioPath) {
+                  finish(resolve, audioPath)
+                } else {
+                  finish(reject, new Error('android audio write failed'))
+                }
+              } else {
+                finish(reject, error)
+              }
             }
           })
+          return
+        }
+
+        if (plusFsAvailable) {
+          const writeStartAt = Date.now()
+          this.writeAppAudioFileWithPlusFs(parts.base64, fileName, parts.mime)
+            .then((audioPath) => {
+              console.log('[chat] write app audio file done', { strategy: 'plus-fs', cost_ms: Date.now() - writeStartAt })
+              finish(resolve, audioPath)
+            })
+            .catch((error) => {
+              console.warn('[chat] plus fs write failed, fallback to android bridge', error)
+              if (androidAvailable) {
+                const audioPath = this.writeAppAudioFileWithAndroid(parts.base64, fileName)
+                if (audioPath) {
+                  finish(resolve, audioPath)
+                } else {
+                  finish(reject, new Error('android audio write failed'))
+                }
+              } else {
+                finish(reject, error)
+              }
+            })
+          return
+        }
+
+        if (androidAvailable) {
+          const writeStartAt = Date.now()
+          const audioPath = this.writeAppAudioFileWithAndroid(parts.base64, fileName)
+          if (audioPath) {
+            console.log('[chat] write app audio file done', { strategy: 'plus-android', cost_ms: Date.now() - writeStartAt })
+            finish(resolve, audioPath)
+          } else {
+            finish(reject, new Error('android audio write failed'))
+          }
           return
         }
 
         finish(reject, new Error('no app file writer available'))
       })
     },
-    playSpeechAudio(audioData, replySeq) {
+    playSpeechAudio(audioInput, replySeq) {
       return new Promise((resolve) => {
-        if (!audioData || replySeq !== this.activeReplySeq) {
+        if (replySeq !== this.activeReplySeq) {
+          resolve(false)
+          return
+        }
+
+        const payload = audioInput && typeof audioInput === 'object' && !Array.isArray(audioInput)
+          ? audioInput
+          : { audio_data: audioInput }
+        const audioUrl = this.resolveAudioSource(payload.audio_url || payload.audioUrl || '')
+        const audioData = String(payload.audio_data || '').trim()
+        if (!audioUrl && !audioData) {
           resolve(false)
           return
         }
@@ -1179,8 +1325,11 @@ export default {
         console.log('[chat] playSpeechAudio', {
           platform: process.env.UNI_PLATFORM,
           has_inner_audio: typeof uni.createInnerAudioContext === 'function',
+          has_audio_url: !!audioUrl,
+          has_audio_data: !!audioData,
+          audio_url: audioUrl,
           data_uri: String(audioData).startsWith('data:audio/'),
-          audio_length: String(audioData).length
+          audio_length: audioData.length
         })
 
         const markAudioStarted = (sourceType, audioSrc) => {
@@ -1286,6 +1435,12 @@ export default {
         }
 
         if (process.env.UNI_PLATFORM !== 'h5') {
+          if (audioUrl) {
+            console.log('[chat] app audio direct source', { src: audioUrl })
+            if (playWithInnerAudio(audioUrl, 'remote-audio-url') || playWithPlusAudio(audioUrl, 'remote-audio-url')) {
+              return
+            }
+          }
           this.writeAppAudioFile(audioData)
             .then((audioSrc) => {
               console.log('[chat] app audio file ready', { src: audioSrc })
@@ -1300,7 +1455,7 @@ export default {
           return
         }
 
-        this.audioElement = new Audio(audioData)
+        this.audioElement = new Audio(audioUrl || audioData)
         this.audioElement.onplay = () => {
           if (replySeq !== this.activeReplySeq) return
           this.speechPlaybackActive = true
@@ -1403,10 +1558,10 @@ export default {
               audio_length: audio && audio.audio_data ? String(audio.audio_data).length : 0,
               note: audio && audio.note
             })
-            if (!audio || !audio.audio_data) {
+            if (!audio || (!audio.audio_url && !audio.audio_data)) {
               continue
             }
-            const played = await this.playSpeechAudio(audio.audio_data, replySeq)
+            const played = await this.playSpeechAudio(audio, replySeq)
             if (!played) {
               console.warn('[chat] tts chunk playback failed', { reply_id: `${replyId}_${i + 1}` })
               this.finishSpeaking(replySeq)
@@ -1426,9 +1581,9 @@ export default {
           note: audio && audio.note
         })
 
-        if (audio && audio.audio_data) {
+        if (audio && (audio.audio_url || audio.audio_data)) {
           this.stopCurrentSpeech(false)
-          const played = await this.playSpeechAudio(audio.audio_data, replySeq)
+          const played = await this.playSpeechAudio(audio, replySeq)
           if (played) {
             this.finishSpeaking(replySeq)
             return

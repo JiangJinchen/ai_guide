@@ -263,7 +263,10 @@ async def generate_guide_asset(
             voice=voice,
             reply_id=f"spot-{spot.id}-{style}-{voice}",
         ))
-        audio_url, audio_path = save_audio_file(spot.id, style, voice, source_hash, tts_result.get("audio_data"))
+        audio_url = tts_result.get("audio_url") or ""
+        audio_path = tts_result.get("audio_path") or None
+        if not audio_url:
+            audio_url, audio_path = save_audio_file(spot.id, style, voice, source_hash, tts_result.get("audio_data"))
         duration_seconds = estimate_duration_seconds(script_text, tts_result.get("duration"))
         if not audio_url:
             status = "text_only"

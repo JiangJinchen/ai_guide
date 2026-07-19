@@ -18,6 +18,7 @@ from urllib.parse import urlparse, urlencode
 from email.utils import formatdate
 from app.database import get_db
 from app.utils.streaming import IntentStreamFilter
+from app.services.guide_asset_service import save_audio_file
 from sqlalchemy.orm import Session
 
 from dotenv import load_dotenv
@@ -766,13 +767,21 @@ async def xunfei_tts(text: str, voice: str = "female"):
             raise Exception("讯飞TTS返回空音频")
 
         wav_data = wrap_pcm16_to_wav(audio_data, sample_rate=16000, channels=1)
-        return {
-            "audio_data": f"data:audio/wav;base64,{base64.b64encode(wav_data).decode()}",
+        audio_data_uri = f"data:audio/wav;base64,{base64.b64encode(wav_data).decode()}"
+        source_hash = hashlib.sha256(f"chat|{voice}|{text}|{len(wav_data)}".encode("utf-8")).hexdigest()
+        audio_url, audio_path = save_audio_file(0, "chat", voice, source_hash, audio_data_uri)
+        result = {
+            "audio_data": "",
+            "audio_url": audio_url or "",
+            "audio_path": audio_path or "",
             "audio_format": "wav",
             "sample_rate": 16000,
             "duration": len(audio_data) / 2 / 16000,
             "speech_text": text
         }
+        if not audio_url:
+            result["audio_data"] = audio_data_uri
+        return result
     except Exception as e:
         raise Exception(f"TTS失败：{str(e)}")
 
