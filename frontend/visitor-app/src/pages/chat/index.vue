@@ -22,6 +22,7 @@
         class="stage-human"
         :status="status"
         :emotion="emotion"
+        :speaking="speechPlaybackActive"
         :model-path="digitalHumanModelPath"
         @ready="onDigitalReady"
         @error="onDigitalError"
@@ -182,6 +183,7 @@ export default {
       digitalHumanVoice: 'female',
       digitalHumanName: '灵山数字导游',
       audioElement: null,
+      speechPlaybackActive: false,
       activeReplySeq: 0,
       isRecognizing: false,
       h5RecorderSupported: false,
@@ -791,6 +793,7 @@ export default {
         let digitalHumanConfig = {}
         let leadSpeechText = ''
         let leadSpeechPromise = null
+        let streamFailed = false
 
         const onMessage = (data) => {
           if (replySeq !== this.activeReplySeq) return
@@ -798,7 +801,7 @@ export default {
           if (data.type === 'content') {
             this.messages[assistantMsgIndex].text = data.text
             replyId = data.reply_id || replyId
-            this.status = 'speak'
+            this.status = 'think'
             this.scrollToBottom()
           } else if (data.type === 'speech') {
             const nextLeadText = String(data.text || '').trim()
@@ -819,7 +822,7 @@ export default {
 
             const emotionExpression = this.getExpressionForEmotion(userEmotion)
             digitalHumanConfig = {
-              action: data.digital_human_action,
+              action: data.digital_human_action === 'speak' ? undefined : data.digital_human_action,
               expression: data.digital_human_expression || emotionExpression,
               motion: data.digital_human_motion
             }
@@ -835,7 +838,7 @@ export default {
               this.$refs.digitalHuman.applyDigitalHuman({
                 ...digitalHumanConfig,
                 emotion: userEmotion,
-                speaking: !!leadSpeechPromise
+                speaking: false
               })
             }
           }
@@ -843,6 +846,8 @@ export default {
 
         const onError = (error) => {
           if (replySeq !== this.activeReplySeq) return
+          if (streamFailed) return
+          streamFailed = true
           console.error('Streaming error:', error)
           this.messages[assistantMsgIndex].text = '当前网络不稳定，您可以稍后再问我。'
           this.status = 'idle'
@@ -960,12 +965,27 @@ export default {
       if (typeof window !== 'undefined' && window.speechSynthesis) {
         window.speechSynthesis.cancel()
       }
-      if (this.audioElement) {
-        this.audioElement.onplay = null
-        this.audioElement.onended = null
-        this.audioElement.onerror = null
-        this.audioElement.pause()
-        this.audioElement = null
+      const audio = this.audioElement
+      console.log('[chat] stopCurrentSpeech', {
+        has_audio: !!audio,
+        audio_type: audio && audio.constructor ? audio.constructor.name : typeof audio,
+        has_pause: !!(audio && typeof audio.pause === 'function'),
+        has_stop: !!(audio && typeof audio.stop === 'function'),
+        has_destroy: !!(audio && typeof audio.destroy === 'function')
+      })
+      this.audioElement = null
+      this.speechPlaybackActive = false
+      if (audio) {
+        try {
+          if (typeof audio.onplay !== 'undefined') audio.onplay = null
+          if (typeof audio.onended !== 'undefined') audio.onended = null
+          if (typeof audio.onerror !== 'undefined') audio.onerror = null
+          if (typeof audio.pause === 'function') audio.pause()
+          if (typeof audio.stop === 'function') audio.stop()
+          if (typeof audio.destroy === 'function') audio.destroy()
+        } catch (error) {
+          console.error('[chat] stop audio failed', error)
+        }
       }
 
       if (resetDigital && this.$refs.digitalHuman) {
@@ -1033,6 +1053,93 @@ export default {
       pushBuffer()
       return chunks.length ? chunks : [normalized]
     },
+    getAudioDataParts(audioData) {
+      const source = String(audioData || '').trim()
+      const match = source.match(/^data:(audio\/[^;]+);base64,(.+)$/)
+      if (!match) {
+        return { mime: 'audio/mpeg', base64: source.replace(/\s/g, ''), isDataUri: false }
+      }
+      return { mime: match[1], base64: String(match[2] || '').replace(/\s/g, ''), isDataUri: true }
+    },
+    getAudioExtension(mime = '') {
+      if (mime.includes('wav')) return 'wav'
+      if (mime.includes('mpeg') || mime.includes('mp3')) return 'mp3'
+      if (mime.includes('aac')) return 'aac'
+      return 'mp3'
+    },
+    writeAppAudioFileWithAndroid(base64, fileName) {
+      try {
+        if (typeof plus === 'undefined' || !plus.android || !plus.io) return ''
+        const localUrl = `_doc/${fileName}`
+        const fullPath = plus.io.convertLocalFileSystemURL(localUrl)
+        const Base64 = plus.android.importClass('android.util.Base64')
+        const FileOutputStream = plus.android.importClass('java.io.FileOutputStream')
+        const cleanBase64 = String(base64 || '').replace(/\s/g, '')
+        const bytes = Base64.decode(cleanBase64, Base64.DEFAULT)
+        if (!bytes) {
+          console.error('[chat] android audio decode returned empty bytes', {
+            file_name: fileName,
+            base64_length: cleanBase64.length
+          })
+          return ''
+        }
+        const stream = new FileOutputStream(fullPath)
+        stream.write(bytes)
+        stream.flush()
+        stream.close()
+        console.log('[chat] android audio file ready', { local_url: localUrl, full_path: fullPath })
+        return fullPath || localUrl
+      } catch (error) {
+        console.error('[chat] android audio write failed', error)
+        return ''
+      }
+    },
+    writeAppAudioFile(audioData) {
+      return new Promise((resolve, reject) => {
+        let settled = false
+        const finish = (callback, value) => {
+          if (settled) return
+          settled = true
+          callback(value)
+        }
+        const parts = this.getAudioDataParts(audioData)
+        if (!parts.base64) {
+          finish(reject, new Error('empty audio data'))
+          return
+        }
+        const ext = this.getAudioExtension(parts.mime)
+        const fileName = `tts_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`
+
+        if (typeof uni.getFileSystemManager === 'function' && uni.env && uni.env.USER_DATA_PATH) {
+          const filePath = `${uni.env.USER_DATA_PATH}/${fileName}`
+          console.log('[chat] write app audio file', { strategy: 'uni-fs', file_path: filePath, mime: parts.mime, base64_length: parts.base64.length })
+          uni.getFileSystemManager().writeFile({
+            filePath,
+            data: parts.base64,
+            encoding: 'base64',
+            success: () => finish(resolve, filePath),
+            fail: (error) => {
+              console.error('[chat] uni-fs write failed', error)
+              finish(reject, error)
+            }
+          })
+          return
+        }
+
+        if (typeof plus !== 'undefined' && plus.android && plus.io) {
+          console.log('[chat] write app audio file', { strategy: 'plus-android', file_name: fileName, mime: parts.mime, base64_length: parts.base64.length })
+          const audioPath = this.writeAppAudioFileWithAndroid(parts.base64, fileName)
+          if (audioPath) {
+            finish(resolve, audioPath)
+          } else {
+            finish(reject, new Error('plus android audio write failed'))
+          }
+          return
+        }
+
+        finish(reject, new Error('no app file writer available'))
+      })
+    },
     playSpeechAudio(audioData, replySeq) {
       return new Promise((resolve) => {
         if (!audioData || replySeq !== this.activeReplySeq) {
@@ -1040,14 +1147,141 @@ export default {
           return
         }
 
+        console.log('[chat] playSpeechAudio', {
+          platform: process.env.UNI_PLATFORM,
+          has_inner_audio: typeof uni.createInnerAudioContext === 'function',
+          data_uri: String(audioData).startsWith('data:audio/'),
+          audio_length: String(audioData).length
+        })
+
+        const markAudioStarted = (sourceType, audioSrc) => {
+          if (replySeq !== this.activeReplySeq) return false
+          this.speechPlaybackActive = true
+          this.status = 'speak'
+          console.log('[chat] app audio play', { source_type: sourceType, src: audioSrc })
+          if (this.$refs.digitalHuman) {
+            this.$refs.digitalHuman.startSpeaking({ motion: 'Tap' })
+          }
+          return true
+        }
+
+        let playbackSettled = false
+        const cleanupAudio = (audio, ok, sourceType, audioSrc, error) => {
+          if (playbackSettled) return
+          playbackSettled = true
+          if (error) {
+            console.error('[chat] app audio error', { source_type: sourceType, src: audioSrc, error })
+          } else {
+            console.log('[chat] app audio ended', { source_type: sourceType, src: audioSrc })
+          }
+          this.speechPlaybackActive = false
+          if (this.audioElement === audio) this.audioElement = null
+          try {
+            if (audio && typeof audio.destroy === 'function') audio.destroy()
+          } catch (e) {}
+          resolve(ok)
+        }
+
+        const playWithPlusAudio = (audioSrc, sourceType = 'plus-audio-file') => {
+          if (typeof plus === 'undefined' || !plus.audio || typeof plus.audio.createPlayer !== 'function') {
+            return false
+          }
+          try {
+            const player = plus.audio.createPlayer(audioSrc)
+            if (!player) return false
+            const audioHandle = {
+              _player: player,
+              stop() {
+                if (player && typeof player.stop === 'function') player.stop()
+              },
+              destroy() {
+                try { if (player && typeof player.stop === 'function') player.stop() } catch (e) {}
+                try { if (player && typeof player.close === 'function') player.close() } catch (e) {}
+              }
+            }
+            this.audioElement = audioHandle
+            let started = false
+            let playTimer = null
+            const onStarted = () => {
+              if (started) return
+              started = true
+              if (playTimer) {
+                clearTimeout(playTimer)
+                playTimer = null
+              }
+              markAudioStarted(sourceType, audioSrc)
+            }
+            const onEnded = () => cleanupAudio(audioHandle, true, sourceType, audioSrc, null)
+            const onError = (error) => cleanupAudio(audioHandle, false, sourceType, audioSrc, error)
+            playTimer = setTimeout(() => {
+              cleanupAudio(audioHandle, false, sourceType, audioSrc, new Error('app audio play timeout'))
+            }, 8000)
+            if (typeof player.addEventListener === 'function') {
+              player.addEventListener('play', onStarted)
+              player.addEventListener('ended', onEnded)
+              player.addEventListener('error', onError)
+            }
+            player.play(() => {
+              onStarted()
+            }, (error) => {
+              onError(error)
+            })
+            return true
+          } catch (error) {
+            console.error('[chat] plus audio play failed', error)
+            return false
+          }
+        }
+
+        const playWithInnerAudio = (audioSrc, sourceType = 'inner-audio-file') => {
+          if (typeof uni.createInnerAudioContext !== 'function') return false
+          const innerAudio = uni.createInnerAudioContext()
+          this.audioElement = innerAudio
+          innerAudio.autoplay = false
+          innerAudio.volume = 1
+          innerAudio.src = audioSrc
+          let playTimer = setTimeout(() => {
+            cleanupAudio(innerAudio, false, sourceType, audioSrc, new Error('app audio play timeout'))
+          }, 8000)
+          innerAudio.onPlay(() => {
+            if (playTimer) {
+              clearTimeout(playTimer)
+              playTimer = null
+            }
+            markAudioStarted(sourceType, audioSrc)
+          })
+          innerAudio.onEnded(() => cleanupAudio(innerAudio, true, sourceType, audioSrc, null))
+          innerAudio.onError((error) => cleanupAudio(innerAudio, false, sourceType, audioSrc, error))
+          innerAudio.play()
+          return true
+        }
+
+        if (process.env.UNI_PLATFORM !== 'h5') {
+          this.writeAppAudioFile(audioData)
+            .then((audioSrc) => {
+              console.log('[chat] app audio file ready', { src: audioSrc })
+              if (!playWithInnerAudio(audioSrc, 'inner-audio-file') && !playWithPlusAudio(audioSrc, 'plus-audio-file')) {
+                resolve(false)
+              }
+            })
+            .catch((error) => {
+              console.error('[chat] write app audio failed', error)
+              resolve(false)
+            })
+          return
+        }
+
         this.audioElement = new Audio(audioData)
         this.audioElement.onplay = () => {
           if (replySeq !== this.activeReplySeq) return
+          this.speechPlaybackActive = true
+          this.status = 'speak'
           if (this.$refs.digitalHuman) {
             this.$refs.digitalHuman.startRealLipSync(this.audioElement)
           }
         }
         this.audioElement.onended = () => {
+          this.speechPlaybackActive = false
           if (this.audioElement) {
             this.audioElement.onplay = null
             this.audioElement.onended = null
@@ -1057,6 +1291,7 @@ export default {
           resolve(true)
         }
         this.audioElement.onerror = () => {
+          this.speechPlaybackActive = false
           if (this.audioElement) {
             this.audioElement.onplay = null
             this.audioElement.onended = null
@@ -1066,7 +1301,9 @@ export default {
           resolve(false)
         }
 
-        this.audioElement.play().catch(() => {
+        this.audioElement.play().catch((error) => {
+          console.error('[chat] h5 audio play failed', error)
+          this.speechPlaybackActive = false
           if (this.audioElement) {
             this.audioElement.onplay = null
             this.audioElement.onended = null
@@ -1096,16 +1333,29 @@ export default {
         utterance.pitch = 1
         utterance.onstart = () => {
           if (replySeq === this.activeReplySeq && this.$refs.digitalHuman) {
+            this.speechPlaybackActive = true
+            this.status = 'speak'
             this.$refs.digitalHuman.startSpeaking({ motion: 'Tap' })
           }
         }
-        utterance.onend = () => resolve(true)
-        utterance.onerror = () => resolve(false)
+        utterance.onend = () => {
+          this.speechPlaybackActive = false
+          resolve(true)
+        }
+        utterance.onerror = () => {
+          this.speechPlaybackActive = false
+          resolve(false)
+        }
         window.speechSynthesis.speak(utterance)
       })
     },
     async trySpeak(text, replySeq = this.activeReplySeq, replyId = String(replySeq)) {
       try {
+        console.log('[chat] trySpeak start', {
+          reply_id: replyId,
+          text_length: String(text || '').length,
+          platform: process.env.UNI_PLATFORM
+        })
         const speechChunks = this.splitSpeechText(text)
         if (speechChunks.length > 1) {
           this.stopCurrentSpeech(false)
@@ -1117,13 +1367,21 @@ export default {
               reply_id: `${replyId}_${i + 1}`
             })
             if (replySeq !== this.activeReplySeq) return
+            console.log('[chat] tts response chunk', {
+              reply_id: `${replyId}_${i + 1}`,
+              has_audio: !!(audio && audio.audio_data),
+              audio_length: audio && audio.audio_data ? String(audio.audio_data).length : 0,
+              note: audio && audio.note
+            })
             if (!audio || !audio.audio_data) {
               continue
             }
-            const played = audio && audio.audio_data
-              ? await this.playSpeechAudio(audio.audio_data, replySeq)
-              : await this.playBrowserSpeech(speechChunks[i], replySeq)
-            if (!played) return
+            const played = await this.playSpeechAudio(audio.audio_data, replySeq)
+            if (!played) {
+              console.warn('[chat] tts chunk playback failed', { reply_id: `${replyId}_${i + 1}` })
+              this.finishSpeaking(replySeq)
+              return
+            }
           }
           this.finishSpeaking(replySeq)
           return
@@ -1131,6 +1389,12 @@ export default {
 
         const audio = await post('/ai/tts', { text, voice: this.digitalHumanVoice, reply_id: replyId })
         if (replySeq !== this.activeReplySeq) return
+        console.log('[chat] tts response', {
+          reply_id: replyId,
+          has_audio: !!(audio && audio.audio_data),
+          audio_length: audio && audio.audio_data ? String(audio.audio_data).length : 0,
+          note: audio && audio.note
+        })
 
         if (audio && audio.audio_data) {
           this.stopCurrentSpeech(false)
@@ -1139,29 +1403,28 @@ export default {
             this.finishSpeaking(replySeq)
             return
           }
-        } else {
-          const played = await this.playBrowserSpeech(text, replySeq)
-          if (played) {
-            this.finishSpeaking(replySeq)
-            return
-          }
+          console.warn('[chat] tts audio playback failed', { reply_id: replyId })
+          this.finishSpeaking(replySeq)
+          return
         }
-      } catch (e) {}
+
+        const played = await this.playBrowserSpeech(text, replySeq)
+        if (played) {
+          this.finishSpeaking(replySeq)
+          return
+        }
+        console.warn('[chat] browser speech playback failed', { reply_id: replyId })
+      } catch (e) {
+        console.error('[chat] trySpeak failed', { reply_id: replyId, error: e && (e.message || e.errMsg || e) })
+      }
 
       if (replySeq !== this.activeReplySeq) return
-      if (this.$refs.digitalHuman) {
-        this.$refs.digitalHuman.startSpeaking({
-          expression: this.getExpressionForEmotion(this.emotion),
-          motion: 'Tap'
-        })
-      }
-      setTimeout(() => {
-        this.finishSpeaking(replySeq)
-      }, Math.min(5200, Math.max(1800, text.length * 80)))
+      this.finishSpeaking(replySeq)
     },
     finishSpeaking(replySeq = this.activeReplySeq) {
       if (replySeq !== this.activeReplySeq) return
       this.status = 'idle'
+      this.speechPlaybackActive = false
       if (this.$refs.digitalHuman) {
         this.$refs.digitalHuman.stopSpeaking()
       }

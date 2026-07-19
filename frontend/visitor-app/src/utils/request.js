@@ -1,4 +1,5 @@
-﻿const BASE_URL = 'http://192.168.208.6:8000/api'
+﻿const BASE_URL = 'http://192.168.208.6:8000/api' //手机热点
+//const BASE_URL = 'http://10.27.246.115:8000/api' //校园网
 
 const normalizeUrl = (url) => {
   if (url.startsWith('/visitor/') || url.startsWith('/admin/') || url.startsWith('/ai/')) {
@@ -90,30 +91,36 @@ const request = (options) => {
           }, 1500)
           reject(res)
         } else {
-          console.error('[request] non-200 response', {
-            url: fullUrl,
-            statusCode: res.statusCode,
-            data: res.data
-          })
+          if (!options.silent) {
+            console.error('[request] non-200 response', {
+              url: fullUrl,
+              statusCode: res.statusCode,
+              data: res.data
+            })
+          }
           const message = formatToastMessage(res.data?.detail, '璇锋眰澶辫触')
-          uni.showToast({ title: message, icon: 'none' })
+          if (!options.silent) uni.showToast({ title: message, icon: 'none' })
           reject(res)
         }
       },
       fail: (error) => {
-        console.error('[request] request failed', {
-          url: fullUrl,
-          error
-        })
+        if (!options.silent) {
+          console.error('[request] request failed', {
+            url: fullUrl,
+            error
+          })
+        }
         const isTimeout = typeof error?.errMsg === 'string' && error.errMsg.includes('timeout')
-        uni.showToast({ title: isTimeout ? '请求超时，请稍后重试' : 'Network request failed', icon: 'none' })
+        if (!options.silent) {
+          uni.showToast({ title: isTimeout ? '请求超时，请稍后重试' : 'Network request failed', icon: 'none' })
+        }
         reject(error || new Error('Network request failed'))
       }
     })
   })
 }
 
-export const get = (url, data = {}) => request({ url, method: 'GET', data })
+export const get = (url, data = {}, options = {}) => request({ url, method: 'GET', data, ...options })
 export const post = (url, data = {}, options = {}) => request({ url, method: 'POST', data, ...options })
 export const put = (url, data = {}, options = {}) => request({ url, method: 'PUT', data, ...options })
 export const del = (url, data = {}, options = {}) => request({ url, method: 'DELETE', data, ...options })

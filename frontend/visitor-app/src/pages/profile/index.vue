@@ -28,6 +28,11 @@
           class="preference-canvas"
           canvas-id="preferenceChart"
           id="preferenceChart"
+          :width="preferenceChartSize"
+          :height="preferenceChartSize"
+          @tap="handlePreferenceChartTap"
+          @touchstart="handlePreferenceChartTap"
+          @touchend="handlePreferenceChartTap"
         ></canvas>
         <view class="preference-center">
           <text class="preference-center-label">{{ activePreferenceItem.label }}</text>
@@ -119,7 +124,8 @@ export default {
       userProfile: {},
       activePreferenceKey: '',
       lastPreferenceTapAt: 0,
-      preferenceChartSize: 180,
+      preferenceChartSize: 160,
+      preferenceChartRect: null,
       footprints: [],
       isPageActive: true
     }
@@ -165,6 +171,7 @@ export default {
     }
   },
   onLoad() {
+    this.syncPreferenceChartSize()
     this.userId = String(uni.getStorageSync('userId') || 'guest')
     const saved = uni.getStorageSync('visitorProfile')
     if (saved) {
@@ -174,9 +181,25 @@ export default {
     this.loadUserProfile()
   },
   onReady() {
+    this.syncPreferenceChartSize()
+    this.measurePreferenceChart()
     this.$nextTick(() => this.drawPreferenceChart())
   },
   methods: {
+    rpxToPx(rpx) {
+      const info = uni.getSystemInfoSync()
+      return (Number(rpx) || 0) * info.windowWidth / 750
+    },
+    syncPreferenceChartSize() {
+      const info = uni.getSystemInfoSync()
+      this.preferenceChartSize = this.rpxToPx(info.windowWidth <= 380 ? 280 : 320)
+    },
+    measurePreferenceChart() {
+      const query = uni.createSelectorQuery().in(this)
+      query.select('#preferenceChart').boundingClientRect(rect => {
+        this.preferenceChartRect = rect || null
+      }).exec()
+    },
     async loadUserProfile() {
       try {
         const res = await get('/recommendation', { user_id: this.userId })
@@ -213,13 +236,15 @@ export default {
     drawPreferenceChart() {
       const items = this.preferenceChartItems
       if (!items.length) return
-      const { size, center, outerRadius, innerRadius } = this.preferenceChartMetrics()
+      this.syncPreferenceChartSize()
+      this.measurePreferenceChart()
+      const { size, center, outerRadius, innerRadius, activeOffset } = this.preferenceChartMetrics()
       const ctx = uni.createCanvasContext('preferenceChart', this)
 
       ctx.clearRect(0, 0, size, size)
       items.forEach(item => {
         const active = item.key === this.activePreferenceKey
-        const offset = active ? 8 : 0
+        const offset = active ? activeOffset : 0
         const offsetX = Math.cos(item.midAngle) * offset
         const offsetY = Math.sin(item.midAngle) * offset
         const cx = center + offsetX
@@ -244,15 +269,17 @@ export default {
     },
     preferenceChartMetrics() {
       const size = this.preferenceChartSize
+      const outerRadius = size * 0.38
+      const innerRadius = size * 0.235
       return {
         size,
         center: size / 2,
-        outerRadius: 68,
-        innerRadius: 42,
-        hitPadding: 4,
-        looseInnerRadius: 10,
-        looseOuterRadius: 144,
-        activeOffset: 8
+        outerRadius,
+        innerRadius,
+        hitPadding: size * 0.025,
+        looseInnerRadius: size * 0.06,
+        looseOuterRadius: size * 0.5,
+        activeOffset: size * 0.035
       }
     },
     normalizePreferenceAngle(angle) {
@@ -284,53 +311,71 @@ export default {
       const angle = this.normalizePreferenceAngle(Math.atan2(dy, dx))
       return this.preferenceChartItems.find(item => angle >= item.startAngle && angle < item.endAngle) || null
     },
-    resolvePreferenceTapPoint(event) {
+    resolvePreferenceTapPoints(event) {
       const source = event.changedTouches?.[0] || event.touches?.[0] || event.detail || event || {}
+      const points = []
       const directX = Number(source.x ?? source.offsetX)
       const directY = Number(source.y ?? source.offsetY)
       if (Number.isFinite(directX) && Number.isFinite(directY)) {
-        return { x: directX, y: directY }
+        points.push({ x: directX, y: directY })
       }
 
       const clientX = Number(source.clientX ?? source.pageX)
       const clientY = Number(source.clientY ?? source.pageY)
-      const canvas = event.currentTarget || event.target
-      const rect = canvas?.getBoundingClientRect?.() ||
-        canvas?.$el?.getBoundingClientRect?.() ||
-        (typeof document !== 'undefined' ? document.getElementById('preferenceChart')?.getBoundingClientRect?.() : null)
+      const rect = this.preferenceChartRect
       if (Number.isFinite(clientX) && Number.isFinite(clientY) && rect) {
         const localX = clientX - rect.left
         const localY = clientY - rect.top
         const scaleX = rect.width ? this.preferenceChartSize / rect.width : 1
         const scaleY = rect.height ? this.preferenceChartSize / rect.height : 1
-        const x = localX * scaleX
-        const y = localY * scaleY
-        return { x, y }
+        points.push({
+          x: localX * scaleX,
+          y: localY * scaleY
+        })
       }
-      return null
+
+      if (Number.isFinite(directX) && Number.isFinite(directY) && rect) {
+        const localX = directX - rect.left
+        const localY = directY - rect.top
+        const scaleX = rect.width ? this.preferenceChartSize / rect.width : 1
+        const scaleY = rect.height ? this.preferenceChartSize / rect.height : 1
+        points.push({
+          x: localX * scaleX,
+          y: localY * scaleY
+        })
+      }
+      return points
     },
     handlePreferenceChartTap(event) {
       const now = Date.now()
-      const point = this.resolvePreferenceTapPoint(event)
-      const x = Number(point?.x)
-      const y = Number(point?.y)
-      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      const points = this.resolvePreferenceTapPoints(event)
+      if (!points.length) {
         return
       }
       if (now - this.lastPreferenceTapAt < 80) return
       this.lastPreferenceTapAt = now
 
-      const hitPoint = { x, y }
-      const candidates = this.preferenceChartItems.filter(item => this.isPointInPreferenceSlice(hitPoint, item))
-      if (!candidates.length) {
-        const looseTarget = this.findPreferenceSliceByAngle(hitPoint)
-        if (looseTarget) {
-          this.selectPreferenceSlice(looseTarget.key)
+      for (const point of points) {
+        const x = Number(point?.x)
+        const y = Number(point?.y)
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+
+        const hitPoint = { x, y }
+        const candidates = this.preferenceChartItems.filter(item => this.isPointInPreferenceSlice(hitPoint, item))
+        if (!candidates.length) {
+          const looseTarget = this.findPreferenceSliceByAngle(hitPoint)
+          if (looseTarget) {
+            this.selectPreferenceSlice(looseTarget.key)
+            return
+          }
+          continue
         }
-        return
+        const target = candidates.find(item => item.key !== this.activePreferenceKey) || candidates[0]
+        if (target) {
+          this.selectPreferenceSlice(target.key)
+          return
+        }
       }
-      const target = candidates.find(item => item.key !== this.activePreferenceKey) || candidates[0]
-      if (target) this.selectPreferenceSlice(target.key)
     },
     async loadFootprints() {
       try {

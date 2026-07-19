@@ -2,7 +2,7 @@
   <view class="home-page">
     <view class="top-search">
       <view class="search-box">
-        <svg t="1784372367736" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="2788" width="32" height="32"><path d="M843.093333 863.573333L723.626667 716.8c47.786667-47.786667 85.333333-116.053333 92.16-191.146667 20.48-177.493333-105.813333-337.92-286.72-354.986666S194.56 276.48 177.493333 453.973333s105.813333 337.92 286.72 354.986667c75.093333 6.826667 150.186667-10.24 208.213334-47.786667l116.053333 146.773334c6.826667 6.826667 17.066667 13.653333 23.893333 13.653333s17.066667 0 27.306667-6.826667c13.653333-13.653333 13.653333-37.546667 3.413333-51.2z m-372.053333-126.293333c-139.946667-13.653333-238.933333-136.533333-221.866667-276.48 13.653333-139.946667 136.533333-238.933333 276.48-221.866667s238.933333 136.533333 221.866667 276.48-139.946667 238.933333-276.48 221.866667z" fill="#707070" p-id="2789"></path></svg>
+        <image class="search-icon" src="/static/icons/search.png" mode="aspectFit"></image>
         <input
           class="search-input"
           v-model="keyword"
@@ -445,6 +445,13 @@ export default {
   box-shadow: 0 14rpx 40rpx rgba(73, 45, 24, 0.1);
 }
 
+.search-icon {
+  width: 32rpx;
+  height: 32rpx;
+  flex-shrink: 0;
+  display: block;
+}
+
 .search-mark,
 .clear {
   width: 48rpx;
@@ -615,6 +622,8 @@ export default {
   bottom: 0;
   height: 148rpx;
   display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
   align-items: stretch;
   background: rgba(255, 250, 240, 0.86);
   backdrop-filter: blur(8rpx);
@@ -622,15 +631,16 @@ export default {
 
 .service-group {
   display: flex;
-  width: 116rpx;
-  min-width: 116rpx;
+  flex: 0 0 108rpx;
+  width: 108rpx;
+  min-width: 0;
   overflow: hidden;
   transition: width 0.25s ease;
 }
 
 .service-group.active {
-  width: 400rpx;
-  flex: 1;
+  flex: 1 1 0;
+  width: auto;
 }
 
 @media screen and (max-width: 380px) {
@@ -660,32 +670,6 @@ export default {
   .service-dock {
     left: 18rpx;
     right: 18rpx;
-    height: auto;
-    flex-wrap: wrap;
-  }
-
-  .service-group,
-  .service-group.active {
-    width: 100%;
-    min-width: 0;
-    flex: 0 0 100%;
-  }
-
-  .group-tab {
-    width: 100%;
-    min-width: 0;
-    flex-direction: row;
-    gap: 12rpx;
-    padding: 16rpx 18rpx;
-    justify-content: flex-start;
-  }
-
-  .group-icon {
-    margin-bottom: 0;
-  }
-
-  .group-services {
-    padding: 14rpx 18rpx 16rpx;
   }
 
   .service-panel {
@@ -713,8 +697,8 @@ export default {
 }
 
 .group-tab {
-  width: 116rpx;
-  min-width: 116rpx;
+  width: 108rpx;
+  min-width: 108rpx;
   display: flex;
   flex-direction: column;
   align-items: center;

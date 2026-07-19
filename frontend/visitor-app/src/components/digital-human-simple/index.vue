@@ -1,5 +1,23 @@
 <template>
   <view class="digital-human" :class="{ compact }" :style="containerStyle">
+    <!-- #ifdef APP-PLUS -->
+    <view
+      class="live2d-stage"
+      ref="stageRef"
+      :id="stageId"
+      :style="stageStyle"
+      :live2d-state="renderState"
+      :change:live2d-state="live2dRender.updateState"
+    >
+      <view v-if="!isReady" class="live2d-mask">
+        <view class="live2d-placeholder">
+          <text class="placeholder-title">{{ loadText }}</text>
+          <text class="placeholder-subtitle">{{ loadSubText }}</text>
+        </view>
+      </view>
+    </view>
+    <!-- #endif -->
+    <!-- #ifndef APP-PLUS -->
     <view class="live2d-stage" ref="stageRef" :style="stageStyle">
       <view v-if="!isReady" class="live2d-mask">
         <view class="live2d-placeholder">
@@ -8,6 +26,7 @@
         </view>
       </view>
     </view>
+    <!-- #endif -->
   </view>
 </template>
 
@@ -93,7 +112,10 @@ export default {
       initializing: false,
       recoveryTimer: null,
       contextLostHandler: null,
-      contextRestoredHandler: null
+      contextRestoredHandler: null,
+      renderActionSeq: 0,
+      renderAction: null,
+      stageId: `live2d-stage-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     }
   },
   computed: {
@@ -115,15 +137,32 @@ export default {
       return {
         minHeight: this.compactMinHeight
       }
+    },
+    renderState() {
+      return {
+        modelPath: this.modelPath,
+        status: this.status,
+        emotion: this.emotion,
+        speaking: this.speaking,
+        compact: this.compact,
+        stageId: this.stageId,
+        action: this.renderAction
+      }
     }
   },
   watch: {
     modelPath(newPath, oldPath) {
-      if (newPath && newPath !== oldPath && this.isReady) {
+      if (!newPath || newPath === oldPath) return
+      if (this.isAppRenderMode()) {
+        this.sendRenderAction('reload')
+        return
+      }
+      if (this.isReady) {
         this.recoverLive2D()
       }
     },
     status(newStatus) {
+      if (this.isAppRenderMode()) return
       if (this.isReady) {
         const motionOptions = this.resolveStatusMotion(newStatus)
         this.playMotion(motionOptions.motion, motionOptions.motionIndex, {
@@ -132,12 +171,14 @@ export default {
       }
     },
     emotion(newEmotion) {
+      if (this.isAppRenderMode()) return
       if (this.isReady) {
         const expression = EMOTION_MAP[newEmotion] || 'Normal'
         this.setExpression(expression)
       }
     },
     speaking(newVal) {
+      if (this.isAppRenderMode()) return
       if (this.isReady) {
         if (newVal) {
           this.startLipSync()
@@ -148,6 +189,7 @@ export default {
     }
   },
   mounted() {
+    if (this.isAppRenderMode()) return
     this.initLive2D()
   },
   beforeUnmount() {
@@ -158,6 +200,29 @@ export default {
     this.destroyLive2D()
   },
   methods: {
+    isAppRenderMode() {
+      return process.env.UNI_PLATFORM === 'app-plus'
+    },
+    sendRenderAction(type, payload = {}) {
+      this.renderAction = {
+        seq: ++this.renderActionSeq,
+        type,
+        payload
+      }
+    },
+    onRenderReady() {
+      this.loadError = ''
+      this.isReady = true
+      console.log('[digital-human] app renderjs ready')
+      this.$emit('ready')
+    },
+    onRenderError(error) {
+      const message = error && (error.message || error.errMsg || error.error) ? (error.message || error.errMsg || error.error) : '加载失败'
+      this.isReady = false
+      this.loadError = message
+      console.error('[digital-human] app renderjs error', error)
+      this.$emit('error', new Error(message))
+    },
     async initLive2D() {
       if (this.initializing) return
       this.initializing = true
@@ -278,6 +343,10 @@ export default {
       }, delay)
     },
     async recoverLive2D() {
+      if (this.isAppRenderMode()) {
+        this.sendRenderAction('reload')
+        return
+      }
       if (this.recovering) return
       if (this.initializing) return
       this.recovering = true
@@ -290,6 +359,10 @@ export default {
       }
     },
     async ensureLive2D() {
+      if (this.isAppRenderMode()) {
+        this.sendRenderAction('ensure')
+        return
+      }
       const canvas = this.app && this.app.view
       const gl = this.app && this.app.renderer && this.app.renderer.gl
       const isLost = this.contextLost || (gl && typeof gl.isContextLost === 'function' && gl.isContextLost())
@@ -300,6 +373,10 @@ export default {
       if (this.app && typeof this.app.start === 'function') this.app.start()
     },
     pauseRendering() {
+      if (this.isAppRenderMode()) {
+        this.sendRenderAction('pause')
+        return
+      }
       if (this.app && typeof this.app.stop === 'function') this.app.stop()
     },
     getCoreModel() {
@@ -517,6 +594,10 @@ export default {
       this.sourceAudioElement = null
     },
     startSpeaking(options = {}) {
+      if (this.isAppRenderMode()) {
+        this.sendRenderAction('startSpeaking', options)
+        return
+      }
       if (!this.isReady) return
       this.setExpression(options.expression || EMOTION_MAP[this.emotion] || 'Normal')
       const speakMotion = this.resolveStatusMotion('speak')
@@ -526,11 +607,19 @@ export default {
       this.startLipSync()
     },
     stopSpeaking() {
+      if (this.isAppRenderMode()) {
+        this.sendRenderAction('stopSpeaking')
+        return
+      }
       this.stopLipSync()
       this.playMotion('Idle', undefined, { force: true })
       this.setExpression('Normal')
     },
-    applyDigitalHuman(options) {
+    applyDigitalHuman(options = {}) {
+      if (this.isAppRenderMode()) {
+        this.sendRenderAction('applyDigitalHuman', options)
+        return
+      }
       if (!this.isReady) return
       if (options.emotion) {
         const expression = EMOTION_MAP[options.emotion] || options.emotion
@@ -558,6 +647,11 @@ export default {
       }
     },
     destroyLive2D(options = {}) {
+      if (this.isAppRenderMode()) {
+        this.isReady = false
+        this.sendRenderAction('destroy')
+        return
+      }
       this.stopLipSync({ releaseAudioGraph: options.releaseAudioGraph !== false })
       this.unbindMouthUpdate()
       this.unbindLive2DTicker()
@@ -579,6 +673,264 @@ export default {
 }
 </script>
 
+<script module="live2dRender" lang="renderjs">
+const PIXI_PATH = '/static/vendor/pixi.min.js'
+const CUBISM_CORE_PATH = '/static/vendor/live2dcubismcore.min.js'
+const LIVE2D_PLUGIN_PATH = '/static/vendor/pixi-live2d-cubism4.min.js'
+const DEFAULT_MODEL_PATH = '/static/live2d/epsilon_ja/epsilon_free/runtime/Epsilon_free.model3.json'
+const MOUTH_PARAM_ID = 'PARAM_MOUTH_OPEN_Y'
+const EMOTION_MAP = { neutral: 'Normal', positive: 'Smile', negative: 'Sad', angry: 'Angry', shy: 'Blushing', surprised: 'Surprised' }
+const STATUS_MOTION_OPTIONS = { idle: { motion: 'Idle' }, listen: { motion: 'FlickUp' }, think: { motion: 'Flick' }, speak: { motion: 'Tap', motionIndex: 3, force: true } }
+
+export default {
+  data() {
+    return { app: null, model: null, initialized: false, initializing: false, lastState: null, lastActionSeq: 0, currentExpression: '', currentMotion: '', mouthOpenValue: 0, lipSyncTimer: null, isSpeakingNow: false, coreModelCache: null, mouthUpdateHandler: null, tickerMouthHandler: null, live2dTickerHandler: null }
+  },
+  mounted() { this.initFromCurrentState() },
+  beforeDestroy() { this.destroyLive2D() },
+  methods: {
+    resolveResourcePath(src) {
+      const value = String(src || '')
+      if (!value || /^(https?:|data:|file:)/.test(value)) return value
+      if (typeof plus !== 'undefined' && plus.io && typeof plus.io.convertLocalFileSystemURL === 'function') {
+        const localValue = value.indexOf('/static/') === 0 ? `_www${value}` : value
+        const converted = plus.io.convertLocalFileSystemURL(localValue)
+        if (converted) return converted
+      }
+      if (value.indexOf('/static/') === 0) return `.${value}`
+      return value
+    },
+    loadScript(src) {
+      const candidates = []
+      const resolved = this.resolveResourcePath(src)
+      candidates.push(resolved)
+      if (resolved && resolved !== src) candidates.push(src)
+      const clean = String(src || '').replace(/^\//, '')
+      candidates.push(`./${clean}`)
+      candidates.push(`/_www/${clean}`)
+      const urls = Array.from(new Set(candidates.filter(Boolean)))
+      const next = (index, resolve, reject) => {
+        if (index >= urls.length) return reject(new Error(`renderjs script load failed: ${src}`))
+        const url = urls[index]
+        const existing = document.querySelector(`script[src="${url}"]`)
+        if (existing) return setTimeout(resolve, 50)
+        const script = document.createElement('script')
+        script.src = url
+        script.onload = resolve
+        script.onerror = () => next(index + 1, resolve, reject)
+        document.head.appendChild(script)
+      }
+      return new Promise((resolve, reject) => next(0, resolve, reject))
+    },
+    initFromCurrentState() {
+      if (this.initializing || this.initialized) return
+      this.initLive2D(this.lastState || {})
+    },
+    updateState(newState) {
+      this.lastState = newState || this.lastState || {}
+      console.log('[digital-human][renderjs] state update', { status: this.lastState.status, emotion: this.lastState.emotion, speaking: this.lastState.speaking, action: this.lastState.action && this.lastState.action.type, seq: this.lastState.action && this.lastState.action.seq })
+      if (!this.initialized) {
+        this.initFromCurrentState()
+        return
+      }
+      this.applyState(this.lastState)
+      this.applyAction(this.lastState.action)
+    },
+    async initLive2D(state = {}) {
+      if (this.initializing) return
+      this.initializing = true
+      try {
+        console.log('[digital-human][renderjs] init start', { model_path: state.modelPath || DEFAULT_MODEL_PATH })
+        await this.loadScript(CUBISM_CORE_PATH)
+        await this.loadScript(PIXI_PATH)
+        await this.loadScript(LIVE2D_PLUGIN_PATH)
+        const PIXI = window.PIXI
+        if (!PIXI || !PIXI.live2d) throw new Error('renderjs Live2D library unavailable')
+        PIXI.live2d.Live2DModel.registerTicker(PIXI.Ticker)
+        const stageEl = this.getStageElement(state.stageId)
+        if (!stageEl) throw new Error('renderjs stage unavailable')
+        console.log('[digital-human][renderjs] stage element', { stage_id: state.stageId, node_type: stageEl.nodeType, node_name: stageEl.nodeName, can_append: typeof stageEl.appendChild === 'function' })
+        if (typeof stageEl.appendChild !== 'function') throw new Error(`renderjs stage cannot append canvas: ${stageEl.nodeName || stageEl.nodeType}`)
+        const width = stageEl.offsetWidth || 300
+        const height = stageEl.offsetHeight || 500
+        this.app = new PIXI.Application({ width, height, backgroundAlpha: 0, antialias: true, autoDensity: true, resolution: Math.min(window.devicePixelRatio || 1, 2) })
+        this.app.view.style.width = '100%'
+        this.app.view.style.height = '100%'
+        stageEl.appendChild(this.app.view)
+        const modelPath = this.resolveResourcePath(state.modelPath || DEFAULT_MODEL_PATH)
+        const model = await Promise.race([
+          PIXI.live2d.Live2DModel.from(modelPath, { autoInteract: false, autoUpdate: false, motionPreload: PIXI.live2d.MotionPreloadStrategy.NONE, idleMotionGroup: 'Idle' }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('renderjs model load timeout')), 20000))
+        ])
+        this.model = model
+        this.app.stage.addChild(model)
+        this.fitModel(width, height)
+        this.coreModelCache = this.getCoreModel()
+        this.bindMouthUpdate()
+        this.bindLive2DTicker()
+        this.initialized = true
+        this.applyState(state)
+        console.log('[digital-human][renderjs] ready')
+        this.notifyOwner('onRenderReady')
+      } catch (error) {
+        console.error('[digital-human][renderjs] init failed', error)
+        this.destroyLive2D()
+        this.notifyOwner('onRenderError', { message: error && error.message ? error.message : String(error || 'renderjs load failed') })
+      } finally {
+        this.initializing = false
+      }
+    },
+    getStageElement(stageId) {
+      const isAppendable = (node) => node && node.nodeType === 1 && typeof node.appendChild === 'function'
+      const candidates = []
+      if (stageId && typeof document !== 'undefined') {
+        candidates.push(document.getElementById(stageId))
+      }
+      candidates.push(this.$el)
+      if (this.$el && typeof this.$el.querySelector === 'function') {
+        candidates.push(this.$el.querySelector('.live2d-stage'))
+        candidates.push(this.$el.querySelector('div'))
+      }
+      if (typeof document !== 'undefined') {
+        candidates.push(document.querySelector(`#${stageId}`))
+        candidates.push(document.querySelector('.live2d-stage'))
+      }
+      for (let i = 0; i < candidates.length; i++) {
+        let node = candidates[i]
+        while (node) {
+          if (isAppendable(node)) return node
+          node = node.parentElement
+        }
+      }
+      console.error('[digital-human][renderjs] no appendable stage', candidates.map((node) => node ? { node_type: node.nodeType, node_name: node.nodeName, can_append: typeof node.appendChild === 'function' } : null))
+      return null
+    },
+    notifyOwner(method, payload) {
+      if (this.$ownerInstance && typeof this.$ownerInstance.callMethod === 'function') this.$ownerInstance.callMethod(method, payload)
+    },
+    fitModel(width, height) {
+      if (!this.model) return
+      const scale = Math.min((width || 300) / this.model.width, (height || 500) / this.model.height) * 0.95
+      this.model.scale.set(scale)
+      this.model.anchor.set(0.5, 1)
+      this.model.x = (width || 300) / 2
+      this.model.y = height || 500
+    },
+    applyState(state = {}) {
+      if (!this.model) return
+      this.setExpression(EMOTION_MAP[state.emotion] || 'Normal')
+      const motionOptions = this.resolveStatusMotion(state.status)
+      this.playMotion(motionOptions.motion, motionOptions.motionIndex, { force: motionOptions.force })
+      state.speaking ? this.startLipSync() : this.stopLipSync()
+    },
+    applyAction(action) {
+      if (!action || !action.seq || action.seq === this.lastActionSeq) return
+      this.lastActionSeq = action.seq
+      const payload = action.payload || {}
+      console.log('[digital-human][renderjs] action', { type: action.type, seq: action.seq })
+      if (action.type === 'reload') return this.reload()
+      if (action.type === 'ensure') return this.app && this.app.start && this.app.start()
+      if (action.type === 'pause') return this.app && this.app.stop && this.app.stop()
+      if (action.type === 'destroy') return this.destroyLive2D()
+      if (action.type === 'startSpeaking') return this.startSpeaking(payload)
+      if (action.type === 'stopSpeaking') return this.stopSpeaking()
+      if (action.type === 'applyDigitalHuman') this.applyDigitalHuman(payload)
+    },
+    async reload() { this.destroyLive2D(); await this.initLive2D(this.lastState || {}) },
+    resolveStatusMotion(status) { return STATUS_MOTION_OPTIONS[status] || STATUS_MOTION_OPTIONS.idle },
+    getMotionPriority(force = false) {
+      const priority = window.PIXI && window.PIXI.live2d && window.PIXI.live2d.MotionPriority
+      if (!priority) return undefined
+      return force ? priority.FORCE : priority.NORMAL
+    },
+    async playMotion(motion, motionIndex, options = {}) {
+      if (!this.model || !motion) return
+      const motionKey = `${motion}:${motionIndex === undefined ? 'random' : motionIndex}`
+      if (!options.force && motionKey === this.currentMotion) return
+      try {
+        const priority = this.getMotionPriority(!!options.force)
+        priority !== undefined ? await this.model.motion(motion, motionIndex, priority) : await this.model.motion(motion, motionIndex)
+        this.currentMotion = motionKey
+      } catch (error) { console.error('[digital-human][renderjs] play motion failed', error) }
+    },
+    async setExpression(expression) {
+      if (!this.model || !expression || expression === this.currentExpression) return
+      try { await this.model.expression(expression); this.currentExpression = expression } catch (error) { console.error('[digital-human][renderjs] set expression failed', error) }
+    },
+    getCoreModel() { return this.model && this.model.internalModel && this.model.internalModel.coreModel ? this.model.internalModel.coreModel : null },
+    bindMouthUpdate() {
+      this.unbindMouthUpdate()
+      this.mouthUpdateHandler = () => this.applyMouthOpen()
+      const internalModel = this.model && this.model.internalModel
+      if (internalModel && typeof internalModel.on === 'function') internalModel.on('beforeModelUpdate', this.mouthUpdateHandler)
+      if (this.app && this.app.ticker) { this.tickerMouthHandler = () => this.applyMouthOpen(); this.app.ticker.add(this.tickerMouthHandler) }
+    },
+    bindLive2DTicker() {
+      this.unbindLive2DTicker()
+      if (!this.app || !this.app.ticker || !this.model) return
+      this.live2dTickerHandler = () => { if (!this.model || this.model.destroyed || this.model._destroyed) return; this.model.update(this.app.ticker.deltaMS || 16.6667) }
+      this.app.ticker.add(this.live2dTickerHandler)
+    },
+    unbindLive2DTicker() { if (this.app && this.app.ticker && this.live2dTickerHandler) this.app.ticker.remove(this.live2dTickerHandler); this.live2dTickerHandler = null },
+    unbindMouthUpdate() {
+      const internalModel = this.model && this.model.internalModel
+      if (internalModel && this.mouthUpdateHandler) {
+        if (typeof internalModel.off === 'function') internalModel.off('beforeModelUpdate', this.mouthUpdateHandler)
+        else if (typeof internalModel.removeListener === 'function') internalModel.removeListener('beforeModelUpdate', this.mouthUpdateHandler)
+      }
+      if (this.app && this.app.ticker && this.tickerMouthHandler) this.app.ticker.remove(this.tickerMouthHandler)
+      this.mouthUpdateHandler = null
+      this.tickerMouthHandler = null
+    },
+    startLipSync() {
+      this.stopLipSync()
+      this.isSpeakingNow = true
+      this.lipSyncTimer = setInterval(() => {
+        if (!this.isSpeakingNow) return
+        let open = 0.25 + Math.sin(Date.now() / 150) * 0.4 + Math.random() * 0.15
+        this.mouthOpenValue = Math.max(0, Math.min(1, open))
+      }, 50)
+    },
+    applyMouthOpen() {
+      const coreModel = this.coreModelCache || this.getCoreModel()
+      if (!coreModel) return
+      const value = Math.max(0, Math.min(1, Number(this.mouthOpenValue) || 0))
+      if (typeof coreModel.setParameterValueById === 'function') coreModel.setParameterValueById(MOUTH_PARAM_ID, value, 1)
+      else if (typeof coreModel.setParamFloat === 'function') coreModel.setParamFloat(MOUTH_PARAM_ID, value)
+      else if (typeof coreModel.addParameterValueById === 'function') coreModel.addParameterValueById(MOUTH_PARAM_ID, value, 1)
+    },
+    stopLipSync() { this.isSpeakingNow = false; if (this.lipSyncTimer) clearInterval(this.lipSyncTimer); this.lipSyncTimer = null; this.mouthOpenValue = 0 },
+    startSpeaking(options = {}) {
+      if (!this.model) return
+      this.setExpression(options.expression || EMOTION_MAP[(this.lastState || {}).emotion] || 'Normal')
+      const speakMotion = this.resolveStatusMotion('speak')
+      this.playMotion(options.motion || speakMotion.motion, options.motionIndex ?? speakMotion.motionIndex, { force: true })
+      this.startLipSync()
+    },
+    stopSpeaking() { this.stopLipSync(); this.playMotion('Idle', undefined, { force: true }); this.setExpression('Normal') },
+    applyDigitalHuman(options = {}) {
+      if (!this.model) return
+      if (options.emotion) this.setExpression(EMOTION_MAP[options.emotion] || options.emotion)
+      if (options.motion) this.playMotion(options.motion, options.motionIndex, { force: true })
+      if (options.expression) this.setExpression(options.expression)
+      if (options.action && options.action !== 'speak') this.stopLipSync()
+      if (options.speaking !== undefined) options.speaking ? this.startLipSync() : this.stopLipSync()
+    },
+    destroyLive2D() {
+      this.stopLipSync()
+      this.unbindMouthUpdate()
+      this.unbindLive2DTicker()
+      if (this.app) { try { this.app.destroy(true, { children: true, texture: true, baseTexture: true }) } catch (error) {}; this.app = null }
+      this.model = null
+      this.coreModelCache = null
+      this.currentExpression = ''
+      this.currentMotion = ''
+      this.initialized = false
+      this.initializing = false
+    }
+  }
+}
+</script>
 <style lang="scss" scoped>
 .digital-human {
   position: relative;

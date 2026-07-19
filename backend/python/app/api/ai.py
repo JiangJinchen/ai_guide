@@ -5,6 +5,7 @@ from typing import Optional, AsyncGenerator
 import httpx
 import os
 import base64
+import struct
 import hashlib
 import hmac
 import json
@@ -581,6 +582,22 @@ def extract_wav_pcm(audio_bytes: bytes) -> bytes:
 
     return audio_bytes[44:]
 
+def wrap_pcm16_to_wav(pcm_bytes: bytes, sample_rate: int = 16000, channels: int = 1) -> bytes:
+    bits_per_sample = 16
+    byte_rate = sample_rate * channels * bits_per_sample // 8
+    block_align = channels * bits_per_sample // 8
+    data_size = len(pcm_bytes)
+    return b"".join([
+        b"RIFF",
+        struct.pack("<I", 36 + data_size),
+        b"WAVE",
+        b"fmt ",
+        struct.pack("<IHHIIHH", 16, 1, channels, sample_rate, byte_rate, block_align, bits_per_sample),
+        b"data",
+        struct.pack("<I", data_size),
+        pcm_bytes,
+    ])
+
 def normalize_asr_audio(audio_data: str, audio_format: str) -> bytes:
     audio_bytes = decode_audio_payload(audio_data)
     normalized_format = (audio_format or "pcm").lower()
@@ -723,7 +740,7 @@ async def xunfei_tts(text: str, voice: str = "female"):
             req = {
                 "common": {"app_id": APP_ID},
                 "business": {
-                    "aue": "lame",
+                    "aue": "raw",
                     "tte": "UTF8",
                     "vcn": VCN,
                     "speed": 50,
@@ -748,9 +765,12 @@ async def xunfei_tts(text: str, voice: str = "female"):
         if not audio_data:
             raise Exception("讯飞TTS返回空音频")
 
+        wav_data = wrap_pcm16_to_wav(audio_data, sample_rate=16000, channels=1)
         return {
-            "audio_data": f"data:audio/mp3;base64,{base64.b64encode(audio_data).decode()}",
-            "duration": len(text) * 0.3,
+            "audio_data": f"data:audio/wav;base64,{base64.b64encode(wav_data).decode()}",
+            "audio_format": "wav",
+            "sample_rate": 16000,
+            "duration": len(audio_data) / 2 / 16000,
             "speech_text": text
         }
     except Exception as e:
