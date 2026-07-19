@@ -115,6 +115,7 @@ export default {
       contextRestoredHandler: null,
       renderActionSeq: 0,
       renderAction: null,
+      renderErrorCount: 0,
       stageId: `live2d-stage-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     }
   },
@@ -211,6 +212,7 @@ export default {
       }
     },
     onRenderReady() {
+      this.renderErrorCount = 0
       this.loadError = ''
       this.isReady = true
       console.log('[digital-human] app renderjs ready')
@@ -218,9 +220,25 @@ export default {
     },
     onRenderError(error) {
       const message = error && (error.message || error.errMsg || error.error) ? (error.message || error.errMsg || error.error) : '加载失败'
+      console.error('[digital-human] app renderjs error', error)
+      if (this.isAppRenderMode()) {
+        if (this.isReady) return
+        this.renderErrorCount += 1
+        const transient = /document unavailable|stage unavailable|querySelector|appendChild|Cannot read property/i.test(message)
+        if (transient && this.renderErrorCount <= 30) {
+          this.loadError = ''
+          const delay = Math.min(1200, 200 + this.renderErrorCount * 100)
+          setTimeout(() => this.sendRenderAction('reload'), delay)
+          return
+        }
+        if (this.renderErrorCount <= 5) {
+          this.loadError = ''
+          setTimeout(() => this.sendRenderAction('reload'), 500)
+          return
+        }
+      }
       this.isReady = false
       this.loadError = message
-      console.error('[digital-human] app renderjs error', error)
       this.$emit('error', new Error(message))
     },
     async initLive2D() {
@@ -444,16 +462,21 @@ export default {
     },
     loadScript(src) {
       return new Promise((resolve, reject) => {
-        const existing = document.querySelector(`script[src="${src}"]`)
+        const doc = typeof document !== 'undefined' ? document : null
+        if (!doc || typeof doc.querySelector !== 'function' || typeof doc.createElement !== 'function' || !doc.head) {
+          reject(new Error('renderjs document unavailable'))
+          return
+        }
+        const existing = doc.querySelector(`script[src="${src}"]`)
         if (existing) {
           setTimeout(resolve, 100)
           return
         }
-        const script = document.createElement('script')
+        const script = doc.createElement('script')
         script.src = src
         script.onload = resolve
         script.onerror = () => reject(new Error(`脚本加载失败: ${src}`))
-        document.head.appendChild(script)
+        doc.head.appendChild(script)
       })
     },
     async setExpression(expression) {
@@ -631,12 +654,8 @@ export default {
       if (options.expression) {
         this.setExpression(options.expression)
       }
-      if (options.action) {
-        if (options.action === 'speak') {
-          this.startLipSync()
-        } else {
-          this.stopLipSync()
-        }
+      if (options.action && options.action !== 'speak') {
+        this.stopLipSync()
       }
       if (options.speaking !== undefined) {
         if (options.speaking) {
@@ -684,11 +703,34 @@ const STATUS_MOTION_OPTIONS = { idle: { motion: 'Idle' }, listen: { motion: 'Fli
 
 export default {
   data() {
-    return { app: null, model: null, initialized: false, initializing: false, lastState: null, lastActionSeq: 0, currentExpression: '', currentMotion: '', mouthOpenValue: 0, lipSyncTimer: null, isSpeakingNow: false, coreModelCache: null, mouthUpdateHandler: null, tickerMouthHandler: null, live2dTickerHandler: null }
+    return { app: null, model: null, initialized: false, initializing: false, lastState: null, lastActionSeq: 0, currentExpression: '', currentMotion: '', mouthOpenValue: 0, lipSyncTimer: null, isSpeakingNow: false, coreModelCache: null, mouthUpdateHandler: null, tickerMouthHandler: null, live2dTickerHandler: null, initRetryTimer: null, initRetryCount: 0, initRetryReason: '' }
   },
   mounted() { this.initFromCurrentState() },
-  beforeDestroy() { this.destroyLive2D() },
+  beforeDestroy() { this.clearInitRetry(); this.destroyLive2D() },
   methods: {
+    clearInitRetry() {
+      if (this.initRetryTimer) {
+        clearTimeout(this.initRetryTimer)
+        this.initRetryTimer = null
+      }
+      this.initRetryReason = ''
+    },
+    scheduleInitRetry(reason, delay = 120) {
+      if (this.initialized) return
+      this.clearInitRetry()
+      this.initRetryReason = reason || ''
+      this.initRetryCount += 1
+      const nextDelay = Math.min(3000, delay + Math.min(this.initRetryCount * 80, 1200))
+      console.log('[digital-human][renderjs] init retry', { reason: this.initRetryReason, count: this.initRetryCount, delay: nextDelay })
+      this.initRetryTimer = setTimeout(() => {
+        this.initRetryTimer = null
+        this.initFromCurrentState()
+      }, nextDelay)
+    },
+    isTransientInitError(error) {
+      const message = error && (error.message || error.errMsg || error.error) ? String(error.message || error.errMsg || error.error) : String(error || '')
+      return /document unavailable|stage unavailable|querySelector|appendChild|Cannot read property|Cannot read properties|renderjs document unavailable|renderjs stage unavailable/i.test(message)
+    },
     resolveResourcePath(src) {
       const value = String(src || '')
       if (!value || /^(https?:|data:|file:)/.test(value)) return value
@@ -709,22 +751,61 @@ export default {
       candidates.push(`./${clean}`)
       candidates.push(`/_www/${clean}`)
       const urls = Array.from(new Set(candidates.filter(Boolean)))
-      const next = (index, resolve, reject) => {
-        if (index >= urls.length) return reject(new Error(`renderjs script load failed: ${src}`))
-        const url = urls[index]
-        const existing = document.querySelector(`script[src="${url}"]`)
-        if (existing) return setTimeout(resolve, 50)
-        const script = document.createElement('script')
-        script.src = url
-        script.onload = resolve
-        script.onerror = () => next(index + 1, resolve, reject)
-        document.head.appendChild(script)
-      }
-      return new Promise((resolve, reject) => next(0, resolve, reject))
+      return new Promise((resolve, reject) => {
+        const waitForDocument = (attempt = 0) => {
+          const doc = typeof document !== 'undefined' ? document : null
+          if (!doc || typeof doc.querySelector !== 'function' || typeof doc.createElement !== 'function' || !doc.head) {
+            if (attempt < 50) {
+              setTimeout(() => waitForDocument(attempt + 1), 100)
+              return
+            }
+            reject(new Error('renderjs document unavailable'))
+            return
+          }
+          const next = (index) => {
+            if (index >= urls.length) {
+              reject(new Error(`renderjs script load failed: ${src}`))
+              return
+            }
+            const url = urls[index]
+            const existing = doc.querySelector(`script[src="${url}"]`)
+            if (existing) return setTimeout(resolve, 50)
+            const script = doc.createElement('script')
+            script.src = url
+            script.onload = resolve
+            script.onerror = () => next(index + 1)
+            doc.head.appendChild(script)
+          }
+          next(0)
+        }
+        waitForDocument()
+      })
+    },
+    waitForStage(stageId, attempt = 0) {
+      return new Promise((resolve, reject) => {
+        const stageEl = this.getStageElement(stageId)
+        if (stageEl) {
+          resolve(stageEl)
+          return
+        }
+        if (attempt >= 50) {
+          reject(new Error('renderjs stage unavailable'))
+          return
+        }
+        setTimeout(() => {
+          this.waitForStage(stageId, attempt + 1).then(resolve).catch(reject)
+        }, 100)
+      })
     },
     initFromCurrentState() {
       if (this.initializing || this.initialized) return
-      this.initLive2D(this.lastState || {})
+      const state = this.lastState || {}
+      if (!state.stageId) {
+        console.log('[digital-human][renderjs] wait for state', { initialized: this.initialized, initializing: this.initializing, has_state: !!this.lastState })
+        this.scheduleInitRetry('missing-stage-id', 80)
+        return
+      }
+      this.initLive2D(state)
     },
     updateState(newState) {
       this.lastState = newState || this.lastState || {}
@@ -740,15 +821,17 @@ export default {
       if (this.initializing) return
       this.initializing = true
       try {
-        console.log('[digital-human][renderjs] init start', { model_path: state.modelPath || DEFAULT_MODEL_PATH })
+        console.log('[digital-human][renderjs] init start', { model_path: state.modelPath || DEFAULT_MODEL_PATH, stage_id: state.stageId })
+        if (!state.stageId) throw new Error('renderjs stage unavailable')
+        const stageEl = await this.waitForStage(state.stageId)
+        if (!stageEl || typeof stageEl.appendChild !== 'function') throw new Error('renderjs stage unavailable')
+        this.stageEl = stageEl
         await this.loadScript(CUBISM_CORE_PATH)
         await this.loadScript(PIXI_PATH)
         await this.loadScript(LIVE2D_PLUGIN_PATH)
         const PIXI = window.PIXI
         if (!PIXI || !PIXI.live2d) throw new Error('renderjs Live2D library unavailable')
         PIXI.live2d.Live2DModel.registerTicker(PIXI.Ticker)
-        const stageEl = this.getStageElement(state.stageId)
-        if (!stageEl) throw new Error('renderjs stage unavailable')
         console.log('[digital-human][renderjs] stage element', { stage_id: state.stageId, node_type: stageEl.nodeType, node_name: stageEl.nodeName, can_append: typeof stageEl.appendChild === 'function' })
         if (typeof stageEl.appendChild !== 'function') throw new Error(`renderjs stage cannot append canvas: ${stageEl.nodeName || stageEl.nodeType}`)
         const width = stageEl.offsetWidth || 300
@@ -773,8 +856,23 @@ export default {
         console.log('[digital-human][renderjs] ready')
         this.notifyOwner('onRenderReady')
       } catch (error) {
+        if (this.isTransientInitError(error) && this.initRetryCount < 60) {
+          console.warn('[digital-human][renderjs] transient renderjs init issue', {
+            reason: this.initRetryReason || (error && error.message ? error.message : String(error || '')),
+            count: this.initRetryCount,
+            message: error && error.message ? error.message : String(error || '')
+          })
+          this.loadError = ''
+          this.destroyLive2D()
+          this.scheduleInitRetry(error && error.message ? error.message : 'transient-render-error')
+          return
+        }
         console.error('[digital-human][renderjs] init failed', error)
-        this.destroyLive2D()
+        this.isReady = false
+        this.loadError = error.message || '加载失败'
+        if (this.app) {
+          this.destroyLive2D()
+        }
         this.notifyOwner('onRenderError', { message: error && error.message ? error.message : String(error || 'renderjs load failed') })
       } finally {
         this.initializing = false
@@ -782,18 +880,19 @@ export default {
     },
     getStageElement(stageId) {
       const isAppendable = (node) => node && node.nodeType === 1 && typeof node.appendChild === 'function'
+      const doc = typeof document !== 'undefined' ? document : null
       const candidates = []
-      if (stageId && typeof document !== 'undefined') {
-        candidates.push(document.getElementById(stageId))
+      if (stageId && doc && typeof doc.getElementById === 'function') {
+        candidates.push(doc.getElementById(stageId))
       }
       candidates.push(this.$el)
       if (this.$el && typeof this.$el.querySelector === 'function') {
         candidates.push(this.$el.querySelector('.live2d-stage'))
         candidates.push(this.$el.querySelector('div'))
       }
-      if (typeof document !== 'undefined') {
-        candidates.push(document.querySelector(`#${stageId}`))
-        candidates.push(document.querySelector('.live2d-stage'))
+      if (doc && typeof doc.querySelector === 'function') {
+        candidates.push(doc.querySelector(`#${stageId}`))
+        candidates.push(doc.querySelector('.live2d-stage'))
       }
       for (let i = 0; i < candidates.length; i++) {
         let node = candidates[i]
@@ -920,6 +1019,7 @@ export default {
       this.stopLipSync()
       this.unbindMouthUpdate()
       this.unbindLive2DTicker()
+      this.clearInitRetry()
       if (this.app) { try { this.app.destroy(true, { children: true, texture: true, baseTexture: true }) } catch (error) {}; this.app = null }
       this.model = null
       this.coreModelCache = null

@@ -9,7 +9,7 @@
       </view>
       <view class="top-actions">
         <button class="history-button" @click="openHistory">
-          <svg t="1784360750105" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="5336" width="200" height="200"><path d="M516.693333 19.2a495.36 495.36 0 1 0 495.36 495.36A495.786667 495.786667 0 0 0 516.693333 19.2z m0 926.72a431.36 431.36 0 1 1 431.36-431.36 431.786667 431.786667 0 0 1-431.36 431.786667z" fill="#ffffff" p-id="5337"></path><path d="M548.693333 501.333333V227.84a32 32 0 0 0-64 0v287.146667a31.573333 31.573333 0 0 0 9.813334 22.613333l235.946666 227.413333a32 32 0 1 0 42.666667-46.08z" fill="#ffffff" p-id="5338"></path></svg>
+          <image class="history-icon" src="/static/icons/history.png" mode="aspectFit"></image>
         </button>
       </view>
     </view>
@@ -278,8 +278,13 @@ export default {
   },
   onShow() {
     this.isPageActive = true
+    this.speechPlaybackActive = false
+    if (this.status === 'speak') this.status = 'idle'
     this.$nextTick(() => {
-      if (this.$refs.digitalHuman) this.$refs.digitalHuman.ensureLive2D()
+      if (this.$refs.digitalHuman) {
+        this.$refs.digitalHuman.ensureLive2D()
+        this.$refs.digitalHuman.stopSpeaking()
+      }
     })
     if (uni.getStorageSync('openChatHistory')) {
       uni.removeStorageSync('openChatHistory')
@@ -288,16 +293,20 @@ export default {
   },
   onHide() {
     this.isPageActive = false
-    if (this.$refs.digitalHuman) {
-      this.$refs.digitalHuman.destroyLive2D({ releaseAudioGraph: false })
-      this.digitalReady = false
-    }
+    this.activeReplySeq += 1
     this.showFeedbackModal = false
     this.closeSseConnection()
     this.stopCurrentSpeech()
+    this.status = 'idle'
+    this.speechPlaybackActive = false
+    if (this.$refs.digitalHuman) {
+      this.$refs.digitalHuman.stopSpeaking()
+      this.$refs.digitalHuman.pauseRendering()
+    }
   },
   onUnload() {
     this.isPageActive = false
+    this.activeReplySeq += 1
     uni.removeStorageSync('chatSession')
     this.cleanupH5Recording()
     this.stopCurrentSpeech(false)
@@ -307,8 +316,7 @@ export default {
       this.$refs.digitalHuman.destroyLive2D({ releaseAudioGraph: false })
       this.digitalReady = false
     }
-  },
-  methods: {
+  },  methods: {
     async loadDigitalHumanConfig() {
       try {
         const config = await get('/digital-human/config')
@@ -366,8 +374,13 @@ export default {
       this.digitalReady = true
     },
     onDigitalError(error) {
-      this.digitalReady = false
       const message = error && error.message ? error.message : '数字人模型加载失败'
+      const transient = /document unavailable|stage unavailable|querySelector|appendChild|Cannot read property/i.test(message)
+      if (transient || this.digitalReady) {
+        console.warn('[chat] ignore transient digital human error', { message })
+        return
+      }
+      this.digitalReady = false
       uni.showToast({ title: message, icon: 'none' })
     },
     initRecorder() {
@@ -793,6 +806,7 @@ export default {
         let digitalHumanConfig = {}
         let leadSpeechText = ''
         let leadSpeechPromise = null
+        let speechStartPromise = null
         let streamFailed = false
 
         const onMessage = (data) => {
@@ -856,6 +870,13 @@ export default {
 
         const onClose = async () => {
           if (replySeq !== this.activeReplySeq) return
+          if (speechStartPromise) {
+            await speechStartPromise
+            if (replySeq !== this.activeReplySeq) return
+            this.chatQuestionCount += 1
+            this.maybePromptChatFeedback(sessionId)
+            return
+          }
           if (leadSpeechPromise) {
             await leadSpeechPromise
             if (replySeq !== this.activeReplySeq) return
@@ -975,6 +996,8 @@ export default {
       })
       this.audioElement = null
       this.speechPlaybackActive = false
+      if (this.status === 'speak') this.status = 'idle'
+      if (this.status === 'speak') this.status = 'idle'
       if (audio) {
         try {
           if (typeof audio.onplay !== 'undefined') audio.onplay = null
@@ -1110,30 +1133,36 @@ export default {
         const ext = this.getAudioExtension(parts.mime)
         const fileName = `tts_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`
 
+        if (typeof plus !== 'undefined' && plus.android && plus.io) {
+          const writeStartAt = Date.now()
+          console.log('[chat] write app audio file', { strategy: 'plus-android', file_name: fileName, mime: parts.mime, base64_length: parts.base64.length })
+          const audioPath = this.writeAppAudioFileWithAndroid(parts.base64, fileName)
+          if (audioPath) {
+            console.log('[chat] write app audio file done', { strategy: 'plus-android', cost_ms: Date.now() - writeStartAt })
+            finish(resolve, audioPath)
+          } else {
+            finish(reject, new Error('plus android audio write failed'))
+          }
+          return
+        }
+
         if (typeof uni.getFileSystemManager === 'function' && uni.env && uni.env.USER_DATA_PATH) {
+          const writeStartAt = Date.now()
           const filePath = `${uni.env.USER_DATA_PATH}/${fileName}`
           console.log('[chat] write app audio file', { strategy: 'uni-fs', file_path: filePath, mime: parts.mime, base64_length: parts.base64.length })
           uni.getFileSystemManager().writeFile({
             filePath,
             data: parts.base64,
             encoding: 'base64',
-            success: () => finish(resolve, filePath),
+            success: () => {
+              console.log('[chat] write app audio file done', { strategy: 'uni-fs', cost_ms: Date.now() - writeStartAt })
+              finish(resolve, filePath)
+            },
             fail: (error) => {
               console.error('[chat] uni-fs write failed', error)
               finish(reject, error)
             }
           })
-          return
-        }
-
-        if (typeof plus !== 'undefined' && plus.android && plus.io) {
-          console.log('[chat] write app audio file', { strategy: 'plus-android', file_name: fileName, mime: parts.mime, base64_length: parts.base64.length })
-          const audioPath = this.writeAppAudioFileWithAndroid(parts.base64, fileName)
-          if (audioPath) {
-            finish(resolve, audioPath)
-          } else {
-            finish(reject, new Error('plus android audio write failed'))
-          }
           return
         }
 
@@ -1359,13 +1388,14 @@ export default {
         const speechChunks = this.splitSpeechText(text)
         if (speechChunks.length > 1) {
           this.stopCurrentSpeech(false)
-          for (let i = 0; i < speechChunks.length; i++) {
+          const speechTasks = speechChunks.map((chunk, index) => post('/ai/tts', {
+            text: chunk,
+            voice: this.digitalHumanVoice,
+            reply_id: `${replyId}_${index + 1}`
+          }))
+          for (let i = 0; i < speechTasks.length; i++) {
             if (replySeq !== this.activeReplySeq) return
-            const audio = await post('/ai/tts', {
-              text: speechChunks[i],
-              voice: this.digitalHumanVoice,
-              reply_id: `${replyId}_${i + 1}`
-            })
+            const audio = await speechTasks[i]
             if (replySeq !== this.activeReplySeq) return
             console.log('[chat] tts response chunk', {
               reply_id: `${replyId}_${i + 1}`,
@@ -1664,6 +1694,12 @@ export default {
   display: flex;
   align-items: flex-end;
   background: rgba(0, 0, 0, 0.38);
+}
+
+.history-icon {
+  width: 32rpx;
+  height: 32rpx;
+  display: block;
 }
 
 .history-sheet {

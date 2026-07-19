@@ -1,4 +1,4 @@
-﻿const BASE_URL = 'http://192.168.208.6:8000/api' //鎵嬫満鐑偣
+const BASE_URL = 'http://192.168.208.6:8000/api' //鎵嬫満鐑偣
 //const BASE_URL = 'http://10.27.246.115:8000/api' //鏍″洯缃?
 const normalizeUrl = (url) => {
   if (url.startsWith('/visitor/') || url.startsWith('/admin/') || url.startsWith('/ai/')) {
@@ -51,14 +51,30 @@ export class SSEClient {
     }
   }
 
+  getXHRConstructor() {
+    if (typeof XMLHttpRequest === 'function') return XMLHttpRequest
+    if (typeof plus !== 'undefined' && plus.net && typeof plus.net.XMLHttpRequest === 'function') {
+      return plus.net.XMLHttpRequest
+    }
+    return null
+  }
+
   async send(data) {
     const payload = normalizePayload(data)
-    if (typeof XMLHttpRequest !== 'function') {
+    const XHR = this.getXHRConstructor()
+    if (!XHR) {
       return this._sendWithUniRequest(payload)
     }
 
     return new Promise((resolve, reject) => {
-      this.xhr = new XMLHttpRequest()
+      try {
+        this.xhr = new XHR()
+      } catch (error) {
+        console.warn('[sse] xhr constructor failed, fallback to uni.request', error)
+        this._sendWithUniRequest(payload).then(resolve).catch(reject)
+        return
+      }
+      console.log('[sse] xhr request', { url: this.url, plus_xhr: typeof XMLHttpRequest !== 'function' })
       this.xhr.open('POST', this.url, true)
       this.xhr.setRequestHeader('Content-Type', 'application/json')
       this.xhr.setRequestHeader('X-User-Id', this.userId)
