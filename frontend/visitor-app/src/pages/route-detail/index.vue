@@ -146,17 +146,28 @@ const TRAVEL_MODE_CONFIG = {
   accessible: { speed: 55, factor: 1.35, extra: 1 }
 }
 const SPOT_COORDS = {
-  灵山大照壁: { latitude: 31.42892, longitude: 120.09487 },
-  五明桥: { latitude: 31.42924, longitude: 120.09542 },
-  佛足坛: { latitude: 31.42966, longitude: 120.09586 },
-  五智门: { latitude: 31.43003, longitude: 120.09628 },
-  菩提大道: { latitude: 31.43048, longitude: 120.09684 },
-  九龙灌浴: { latitude: 31.43102, longitude: 120.09726 },
-  灵山大佛: { latitude: 31.43334, longitude: 120.09958 },
-  灵山梵宫: { latitude: 31.43072, longitude: 120.10116 },
-  五印坛城: { latitude: 31.42998, longitude: 120.10174 },
-  香月花街: { latitude: 31.42822, longitude: 120.10282 },
-  梵天花海: { latitude: 31.42688, longitude: 120.10418 }
+  灵山大照壁: { latitude: 31.421388, longitude: 120.102499 },
+  五明桥: { latitude: 31.421749, longitude: 120.102248 },
+  佛足坛: { latitude: 31.422725, longitude: 120.101497 },
+  五智门: { latitude: 31.423055, longitude: 120.101292 },
+  菩提大道: { latitude: 31.423182, longitude: 120.101143 },
+  九龙灌浴: { latitude: 31.424601, longitude: 120.099984 },
+  降魔浮雕: { latitude: 31.425559, longitude: 120.099569 },
+  阿育王柱: { latitude: 31.426188, longitude: 120.099261 },
+  百子戏弥勒: { latitude: 31.42719, longitude: 120.098844 },
+  祥符禅寺: { latitude: 31.427949, longitude: 120.098012 },
+  灵山大佛: { latitude: 31.430194, longitude: 120.096477 },
+  佛教文化博览馆: { latitude: 31.429924, longitude: 120.096629 },
+  无尽意斋: { latitude: 31.428768, longitude: 120.096987 },
+  灵山梵宫: { latitude: 31.428218, longitude: 120.10242 },
+  五印坛城: { latitude: 31.424676, longitude: 120.103054 },
+  曼飞龙塔: { latitude: 31.42607, longitude: 120.104609 },
+  拈花广场: { latitude: 31.422807, longitude: 120.080082 },
+  香月花街: { latitude: 31.416822, longitude: 120.073636 },
+  拈花堂: { latitude: 31.423012, longitude: 120.080120 },
+  五灯湖: { latitude: 31.418665, longitude: 120.075312 },
+  梵天花海: { latitude: 31.415904, longitude: 120.075421 },
+  鹿鸣谷: { latitude: 31.438472, longitude: 120.172608 }
 }
 
 export default {
@@ -348,7 +359,7 @@ export default {
       const meterPerLon = 111000 * Math.cos(center.latitude * Math.PI / 180)
       const dx = (spot.longitude - center.longitude) * meterPerLon
       const dy = (spot.latitude - center.latitude) * meterPerLat
-      const range = 1000
+      const range = 700
       const x = Math.max(8, Math.min(92, 50 + (dx / range) * 42))
       const y = Math.max(8, Math.min(92, 50 - (dy / range) * 42))
       return { x: Math.round(x), y: Math.round(y) }
@@ -1123,13 +1134,16 @@ export default {
 }
 
 .action-bar {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  display: flex;
+  flex-direction: row;
   gap: 16rpx;
   padding: 22rpx 24rpx;
 }
 
 .action-btn {
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
   min-height: 72rpx;
   padding: 0 8rpx;
   display: flex;

@@ -15,13 +15,15 @@
         @regionchange="handleRegionChange"
       />
 
-      <view class="map-status">
-        <view class="status-main">
-          <text class="status-title">{{ currentInstruction }}</text>
-          <text class="status-desc">{{ trackingStatusText }} · {{ distanceToTargetText }} · {{ providerText }}</text>
-        </view>
-        <view class="status-pill">{{ navigationStateText }}</view>
-      </view>
+      <cover-view class="map-status">
+        <cover-view class="status-main">
+          <cover-view class="status-title">{{ currentInstruction }}</cover-view>
+          <cover-view class="status-desc">
+            {{ trackingStatusText }} · {{ distanceToTargetText }} · {{ providerText }}
+          </cover-view>
+        </cover-view>
+        <cover-view class="status-pill">{{ navigationStateText }}</cover-view>
+      </cover-view>
     </view>
 
     <view class="scenic-notice" v-if="scenicStartNotice">

@@ -81,6 +81,9 @@ export default {
           uni.setStorageSync('access_token', res.access_token)
           uni.setStorageSync('refresh_token', res.refresh_token)
           uni.setStorageSync('user_info', JSON.stringify(res.user))
+          if (res.user && res.user.id !== undefined && res.user.id !== null) {
+            uni.setStorageSync('userId', String(res.user.id))
+          }
           
           uni.hideLoading()
           uni.showToast({ title: '登录成功', icon: 'success' })

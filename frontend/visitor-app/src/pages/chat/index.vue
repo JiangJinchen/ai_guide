@@ -72,9 +72,13 @@
           </text>
         </view>
         <view class="input-tools">
-          <view class="emoji-trigger" @click="toggleEmojiPanel">
-            <text class="emoji-icon">😊</text>
-          </view>
+            <view 
+              class="emoji-trigger" 
+              :class="{ disabled: status === 'listen' || status === 'recognizing' || status === 'think' }"
+              @click="toggleEmojiPanel"
+            >
+              <text class="emoji-icon">😊</text>
+            </view>
           <input
             class="text-input"
             v-model="inputText"
@@ -93,6 +97,7 @@
               v-for="(item, index) in emojiList" 
               :key="index" 
               @click="selectEmoji(item)"
+              :class="{ disabled: status === 'listen' || status === 'recognizing' || status === 'think' }"
             >
               <text class="emoji-char">{{ item.emoji }}</text>
               <text class="emoji-label">{{ item.label }}</text>
@@ -760,9 +765,11 @@ export default {
       })
     },
     toggleEmojiPanel() {
+      if (this.status === 'listen' || this.status === 'recognizing' || this.status === 'think') return
       this.showEmojiPanel = !this.showEmojiPanel
     },
     selectEmoji(item) {
+      if (this.status === 'listen' || this.status === 'recognizing' || this.status === 'think') return
       this.inputText += item.emoji
       this.showEmojiPanel = false
     },

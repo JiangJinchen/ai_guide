@@ -1471,10 +1471,26 @@ def get_user_behaviors(user_id: str = "guest", db: Session = Depends(get_db)):
 
 @router.get("/footprints")
 def get_user_footprints(user_id: str = "guest", db: Session = Depends(get_db)):
+    logger.info("[footprints] request user_id=%s", user_id)
     behaviors = db.query(AppUserBehavior).filter(
         AppUserBehavior.visitor_id == user_id,
         AppUserBehavior.behavior_type == "navigate"
     ).order_by(AppUserBehavior.created_at.asc()).all()
+    logger.info("[footprints] raw navigate count=%s", len(behaviors))
+    if behaviors:
+        logger.info(
+            "[footprints] sample rows=%s",
+            [
+                {
+                    "id": b.id,
+                    "visitor_id": b.visitor_id,
+                    "spot_id": b.spot_id,
+                    "spot_name": b.spot_name,
+                    "created_at": b.created_at.isoformat() if b.created_at else None,
+                }
+                for b in behaviors[:5]
+            ],
+        )
     
     visited_spots = {}
     for b in behaviors:
@@ -1489,6 +1505,7 @@ def get_user_footprints(user_id: str = "guest", db: Session = Depends(get_db)):
             }
     
     footprints = list(visited_spots.values())
+    logger.info("[footprints] distinct footprints=%s names=%s", len(footprints), [item["spot_name"] for item in footprints[:10]])
     return {
         "status": "ok",
         "user_id": user_id,
@@ -2128,28 +2145,28 @@ SPOT_ORDER_WEIGHT = {
 }
 
 SPOT_COORDS = {
-    "灵山大照壁": {"latitude": 31.42892, "longitude": 120.09487},
-    "五明桥": {"latitude": 31.42924, "longitude": 120.09542},
-    "佛足坛": {"latitude": 31.42966, "longitude": 120.09586},
-    "五智门": {"latitude": 31.43003, "longitude": 120.09628},
-    "菩提大道": {"latitude": 31.43048, "longitude": 120.09684},
-    "九龙灌浴": {"latitude": 31.43102, "longitude": 120.09726},
-    "降魔浮雕": {"latitude": 31.43142, "longitude": 120.09782},
-    "阿育王柱": {"latitude": 31.43184, "longitude": 120.09822},
-    "百子戏弥勒": {"latitude": 31.43218, "longitude": 120.09876},
-    "祥符禅寺": {"latitude": 31.43272, "longitude": 120.09910},
-    "灵山大佛": {"latitude": 31.43334, "longitude": 120.09958},
-    "佛教文化博览馆": {"latitude": 31.43235, "longitude": 120.10028},
-    "无尽意斋": {"latitude": 31.43156, "longitude": 120.10066},
-    "灵山梵宫": {"latitude": 31.43072, "longitude": 120.10116},
-    "五印坛城": {"latitude": 31.42998, "longitude": 120.10174},
-    "曼飞龙塔": {"latitude": 31.42940, "longitude": 120.10208},
-    "拈花广场": {"latitude": 31.42876, "longitude": 120.10242},
-    "香月花街": {"latitude": 31.42822, "longitude": 120.10282},
-    "拈花堂": {"latitude": 31.42774, "longitude": 120.10318},
-    "五灯湖": {"latitude": 31.42728, "longitude": 120.10362},
-    "梵天花海": {"latitude": 31.42688, "longitude": 120.10418},
-    "鹿鸣谷": {"latitude": 31.42636, "longitude": 120.10462}
+    "灵山大照壁": {"latitude": 31.421388, "longitude": 120.102499},
+    "五明桥": {"latitude": 31.421749, "longitude": 120.102248},
+    "佛足坛": {"latitude": 31.422725, "longitude": 120.101497},
+    "五智门": {"latitude": 31.423055, "longitude": 120.101292},
+    "菩提大道": {"latitude": 31.423182, "longitude": 120.101143},
+    "九龙灌浴": {"latitude": 31.424601, "longitude": 120.099984},
+    "降魔浮雕": {"latitude": 31.425559, "longitude": 120.099569},
+    "阿育王柱": {"latitude": 31.426188, "longitude": 120.099261},
+    "百子戏弥勒": {"latitude": 31.42719, "longitude": 120.098844},
+    "祥符禅寺": {"latitude": 31.427949, "longitude": 120.098012},
+    "灵山大佛": {"latitude": 31.430194, "longitude": 120.096477},
+    "佛教文化博览馆": {"latitude": 31.429924, "longitude": 120.096629},
+    "无尽意斋": {"latitude": 31.428768, "longitude": 120.096987},
+    "灵山梵宫": {"latitude": 31.428218, "longitude": 120.10242},
+    "五印坛城": {"latitude": 31.424676, "longitude": 120.103054},
+    "曼飞龙塔": {"latitude": 31.42607, "longitude": 120.104609},
+    "拈花广场": {"latitude": 31.422807, "longitude": 120.080082},
+    "香月花街": {"latitude": 31.416822, "longitude": 120.073636},
+    "拈花堂": {"latitude": 31.423012, "longitude": 120.080120},
+    "五灯湖": {"latitude": 31.418665, "longitude": 120.075312},
+    "梵天花海": {"latitude": 31.415904, "longitude": 120.075421},
+    "鹿鸣谷": {"latitude": 31.438472, "longitude": 120.172608}
 }
 
 ROUTE_PROFILES = {

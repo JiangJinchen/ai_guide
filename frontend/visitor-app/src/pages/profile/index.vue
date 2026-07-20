@@ -46,31 +46,25 @@
         <text class="section-title">我的游览足迹</text>
         <text class="section-sub">{{ footprints.length }} 个景点</text>
       </view>
-      <view class="footprint-map" v-if="footprints.length > 0">
-        <svg class="map-svg" viewBox="0 0 400 200">
-          <polyline
-            v-if="footprints.length > 1"
-            :points="svgPathPoints"
-            fill="none"
-            stroke="#8c3228"
-            stroke-width="2"
-            stroke-dasharray="5,3"
-            opacity="0.6"
-          />
-          <circle
-            v-for="(item, index) in footprints"
-            :key="'circle-' + item.spot_name"
-            :cx="item.svgX"
-            :cy="item.svgY"
-            r="8"
-            :fill="index === 0 ? '#2d5a4a' : index === footprints.length - 1 ? '#8c3228' : '#a65c3e'"
-          />
-        </svg>
+      <view id="footprintMap" class="footprint-map" v-if="footprints.length > 0">
+        <view
+          v-for="(segment, index) in footprintSegments"
+          :key="'line-' + index"
+          class="map-line-segment"
+          :style="segment.style"
+        ></view>
+        <view
+          v-for="(item, index) in footprints"
+          :key="'dot-' + item.spot_name"
+          class="map-dot"
+          :class="{ start: index === 0, end: index === footprints.length - 1 }"
+          :style="{ left: item.svgX + '%', top: item.svgY + '%' }"
+        ></view>
         <view
           v-for="(item, index) in footprints"
           :key="'label-' + item.spot_name"
           class="map-pin"
-          :style="{ left: (item.svgX / 4) + '%', top: (item.svgY / 2) + '%' }"
+          :style="{ left: item.svgX + '%', top: item.svgY + '%' }"
           @click="goToGuide(item.spot_id)"
         >
           <text class="pin-name">{{ item.spot_name }}</text>
@@ -127,6 +121,7 @@ export default {
       preferenceChartSize: 160,
       preferenceChartRect: null,
       footprints: [],
+      footprintMapRect: null,
       isPageActive: true
     }
   },
@@ -134,8 +129,29 @@ export default {
     shortUserId() {
       return this.userId ? String(this.userId).slice(-8) : 'guest'
     },
-    svgPathPoints() {
-      return this.footprints.map(item => `${item.svgX},${item.svgY}`).join(' ')
+    footprintSegments() {
+      return this.footprints.slice(1).map((item, index) => {
+        const previous = this.footprints[index]
+        const width = this.footprintMapRect?.width || 0
+        const height = this.footprintMapRect?.height || 0
+        if (!width || !height) return null
+        const x1 = previous.svgX / 100 * width
+        const y1 = previous.svgY / 100 * height
+        const x2 = item.svgX / 100 * width
+        const y2 = item.svgY / 100 * height
+        const dx = x2 - x1
+        const dy = y2 - y1
+        const length = Math.sqrt(dx * dx + dy * dy)
+        const angle = Math.atan2(dy, dx) * 180 / Math.PI
+        return {
+          style: {
+            left: x1 + 'px',
+            top: y1 + 'px',
+            width: length + 'px',
+            transform: `rotate(${angle}deg)`
+          }
+        }
+      }).filter(Boolean)
     },
     preferenceChartItems() {
       const entries = Object.entries(this.userProfile || {})
@@ -179,10 +195,12 @@ export default {
       this.signature = saved.signature || this.signature
     }
     this.loadUserProfile()
+    this.loadFootprints()
   },
   onReady() {
     this.syncPreferenceChartSize()
     this.measurePreferenceChart()
+    this.measureFootprintMap()
     this.$nextTick(() => this.drawPreferenceChart())
   },
   methods: {
@@ -198,6 +216,12 @@ export default {
       const query = uni.createSelectorQuery().in(this)
       query.select('#preferenceChart').boundingClientRect(rect => {
         this.preferenceChartRect = rect || null
+      }).exec()
+    },
+    measureFootprintMap() {
+      const query = uni.createSelectorQuery().in(this)
+      query.select('#footprintMap').boundingClientRect(rect => {
+        this.footprintMapRect = rect || null
       }).exec()
     },
     async loadUserProfile() {
@@ -379,38 +403,56 @@ export default {
     },
     async loadFootprints() {
       try {
+        console.log('[profile][footprints] request', { userId: this.userId })
         const res = await get('/footprints', { user_id: this.userId })
         const data = res.footprints || []
+        console.log('[profile][footprints] response', {
+          userId: this.userId,
+          status: res.status,
+          count: res.count,
+          rawCount: data.length,
+          sample: data.slice(0, 3)
+        })
         this.footprints = this.convertCoords(data)
+        this.$nextTick(() => this.measureFootprintMap())
+        console.log('[profile][footprints] rendered', { userId: this.userId, renderedCount: this.footprints.length })
       } catch (e) {
+        console.warn('[profile][footprints] load failed', { userId: this.userId, error: e })
         this.footprints = []
       }
     },
     convertCoords(data) {
-      const minLat = 31.426
-      const maxLat = 31.434
-      const minLon = 120.094
-      const maxLon = 120.105
+      const points = data.map(item => ({
+        ...item,
+        lat: parseFloat(item.latitude) || 0,
+        lon: parseFloat(item.longitude) || 0
+      }))
+      const validPoints = points.filter(item => item.lat && item.lon)
+      const latValues = validPoints.map(item => item.lat)
+      const lonValues = validPoints.map(item => item.lon)
+      const minLat = Math.min(...latValues, 31.426)
+      const maxLat = Math.max(...latValues, 31.434)
+      const minLon = Math.min(...lonValues, 120.094)
+      const maxLon = Math.max(...lonValues, 120.105)
+      const latRange = Math.max(maxLat - minLat, 0.0001)
+      const lonRange = Math.max(maxLon - minLon, 0.0001)
       
-      return data.map(item => {
-        const lat = parseFloat(item.latitude) || 0
-        const lon = parseFloat(item.longitude) || 0
-        
+      return points.map((item, index) => {
         let svgX = 50
-        let svgY = 100
+        let svgY = 50
         
-        if (lat && lon) {
-          svgX = ((lon - minLon) / (maxLon - minLon)) * 320 + 40
-          svgY = ((maxLat - lat) / (maxLat - minLat)) * 160 + 20
+        if (item.lat && item.lon) {
+          svgX = ((item.lon - minLon) / lonRange) * 78 + 11
+          svgY = ((maxLat - item.lat) / latRange) * 70 + 15
         } else {
-          svgX = 40 + Math.random() * 320
-          svgY = 20 + Math.random() * 160
+          svgX = 18 + (index % 5) * 16
+          svgY = 24 + Math.floor(index / 5) * 18
         }
         
         return {
           ...item,
-          svgX: Math.round(svgX),
-          svgY: Math.round(svgY)
+          svgX: Math.round(svgX * 10) / 10,
+          svgY: Math.round(svgY * 10) / 10
         }
       })
     },
@@ -457,6 +499,7 @@ export default {
     },
     onShow() {
       this.isPageActive = true
+      this.userId = String(uni.getStorageSync('userId') || 'guest')
       this.loadFootprints()
       this.maybePromptAppFeedback()
     },
@@ -698,12 +741,34 @@ export default {
     linear-gradient(135deg, #ead9b9, #d8be86);
 }
 
-.map-svg {
+.map-line-segment {
   position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
+  height: 4rpx;
+  border-radius: 999rpx;
+  background: rgba(140, 50, 40, 0.45);
+  border-top: 2rpx dashed rgba(140, 50, 40, 0.72);
+  transform-origin: 0 50%;
+  z-index: 1;
+}
+
+.map-dot {
+  position: absolute;
+  width: 18rpx;
+  height: 18rpx;
+  border-radius: 50%;
+  background: #a65c3e;
+  border: 4rpx solid rgba(255, 248, 232, 0.92);
+  box-shadow: 0 4rpx 12rpx rgba(75, 43, 24, 0.18);
+  transform: translate(-50%, -50%);
+  z-index: 2;
+}
+
+.map-dot.start {
+  background: #2d5a4a;
+}
+
+.map-dot.end {
+  background: #8c3228;
 }
 
 .map-pin {
@@ -715,8 +780,9 @@ export default {
   border-radius: 999rpx;
   background: rgba(255, 248, 232, 0.92);
   box-shadow: 0 4rpx 12rpx rgba(75, 43, 24, 0.12);
-  transform: translate(-10rpx, -50%);
+  transform: translate(10rpx, -50%);
   white-space: nowrap;
+  z-index: 3;
 }
 
 .pin-name {
